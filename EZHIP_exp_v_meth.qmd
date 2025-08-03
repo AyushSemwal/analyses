@@ -1,0 +1,2331 @@
+---
+title: "Relationship between EZHIP expression and methylation"
+format:
+  pdf: default
+  elsevier-pdf:
+    toc: true
+    toc-location: left
+    keep-tex: true
+---
+
+## Data download and prepare
+
+### Download
+
+-   Use TCGAbiolinks to download the data from GDC
+
+\tiny
+
+```{r download_data, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+library(TCGAbiolinks, quietly = T)
+
+project_list <- TCGAbiolinks:::getGDCprojects()$project_id
+TCGA_project_list <- project_list[grep("TCGA", project_list)]
+
+### Expression data ###
+
+TCGA_exp_query <- GDCquery(
+    project = TCGA_project_list,
+    data.category = "Gene expression",
+    data.type = "Gene expression quantification",
+    experimental.strategy = "RNA-Seq",
+    legacy = TRUE
+)
+
+saveRDS(TCGA_exp_query, file = "/path/to/gene_expression_query.rds")
+TCGA_exp_query <- readRDS("/path/to/gene_expression_query.rds")
+
+GDCdownload(
+    query = TCGA_exp_query, 
+    directory = "/path/to",
+    method = "api", 
+    files.per.chunk = 5
+)
+
+### Expression data harmonized ###
+
+TCGA_exp_harmonized_query <- GDCquery(
+    project = TCGA_project_list,
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    experimental.strategy = "RNA-Seq",
+    legacy = FALSE
+)
+
+saveRDS(TCGA_exp_harmonized_query, file = "/path/to/gene_expression_harmonized_query.rds")
+TCGA_exp_harmonized_query <- readRDS("/path/to/gene_expression_harmonized_query.rds")
+
+GDCdownload(TCGA_exp_harmonized_query, 
+    directory = "/path/to/",
+    method = "api"
+)
+
+```
+
+\normalsize
+
+\tiny
+
+```{r meth_data, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+### Methylation harmonized data ###
+
+TCGA_meth_query <- GDCquery(
+    project = TCGA_project_list,
+    data.category = "DNA Methylation",
+    data.type = "Methylation Beta Value"
+)
+
+saveRDS(TCGA_meth_query, file = "/path/to/TCGA_meth_harmonized_query.rds")
+TCGA_meth_query <- readRDS("/path/to/TCGA_meth_harmonized_query.rds")
+
+GDCdownload(TCGA_meth_query, 
+    directory = "/path/to/",
+    method = "api"
+)
+
+```
+
+\normalsize
+
+-   Note - Only 450K array data is available for harmonized dataset
+
+### Prepare
+
+-   I was having some issues preparing all the projects in a single object. So, I ended up storing different project objects in two lists (one for expression and other for methylation).
+
+\tiny
+
+```{r prepare_exp_list, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+library(SingleCellExperiment, quietly = T)
+library(SummarizedExperiment, quietly = T)
+library(fst, quietly = T)
+
+################################################################################################################################################  
+################################################################# exp data #####################################################################
+################################################################################################################################################  
+
+TCGA_exp_harmonized_data = list()
+
+for (i in (length(TCGA_exp_harmonized_data) + 1):length(TCGA_project_list)){
+  TCGA_exp_harmonized_data[i] <- GDCprepare(
+    query = GDCquery(project = TCGA_project_list[i],
+                     data.category = "Transcriptome Profiling",
+                     data.type = "Gene Expression Quantification",
+                     experimental.strategy = "RNA-Seq",
+                     legacy = FALSE),
+    directory = "/path/to")
+}
+
+saveRDS(TCGA_exp_harmonized_data,
+        file = "/path/to/TCGA_exp_harmonized_data.rds")
+
+```
+
+
+```{r prepare_meth_list, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+################################################################################################################################################  
+################################################################ meth data #####################################################################
+################################################################################################################################################  
+
+TCGA_meth_harmonized_450k_data = list()
+
+for (i in (length(TCGA_meth_harmonized_450k_data) + 1):length(TCGA_project_list)){
+  TCGA_meth_harmonized_450k_data[i] <- GDCprepare(
+    query = GDCquery(project = TCGA_project_list[i],
+                     data.category = "DNA Methylation",
+                     data.type = "Methylation Beta Value",
+                     platform = "Illumina Human Methylation 450",
+                     legacy = FALSE),
+    directory = "/path/to")
+}
+
+saveRDS(TCGA_meth_harmonized_450k_data, file = "/path/to/TCGA_meth_harmonized_450k_data.rds")
+
+```
+
+\normalsize
+
+* Realized later that it might be memory efficient and less time consuming to save the meth and exp in fst files as data frames.
+* So, the following chunks retreive the meth and exp data into their resepective data frames and are saved as fst files.
+* colData (selected information only) for each experiment type was saved in a similar manner.
+
+\tiny
+
+```{r exp_data_frame, cache=TRUE, message=FALSE, echo=FALSE}
+
+TCGA_exp_harmonized_data <- readRDS("/path/to/TCGA_exp_harmonized_data.rds")
+
+for (i in 1:length(TCGA_exp_harmonized_data)){
+  meta_data <- colData(TCGA_exp_harmonized_data[[i]])
+  if (i == 1){
+    TCGA_exp_harmonized_fpkm <- assays(TCGA_exp_harmonized_data[[i]])$fpkm_unstrand
+    TCGA_exp_harmonized_colData <- meta_data[,c("sample_type",
+                                                "primary_diagnosis",
+                                                "project_id",
+                                                "sample")]
+  }
+  else {
+    TCGA_exp_harmonized_fpkm <- cbind(TCGA_exp_harmonized_fpkm,
+                                      assays(TCGA_exp_harmonized_data[[i]])$fpkm_unstrand)
+    TCGA_exp_harmonized_colData <- rbind(TCGA_exp_harmonized_colData,
+                                         meta_data[,c("sample_type",
+                                                      "primary_diagnosis",
+                                                      "project_id",
+                                                      "sample")])
+  }
+}
+
+TCGA_exp_harmonized_fpkm <- as.data.frame(TCGA_exp_harmonized_fpkm)
+TCGA_exp_harmonized_fpkm$genes <- rownames(TCGA_exp_harmonized_fpkm)
+
+write_fst(TCGA_exp_harmonized_fpkm,
+          "/path/to/analysis_in_quarto/analysis_in_quarto_files/TCGA_exp_harmonized_fpkm.fst",
+          compress = 100, uniform_encoding = TRUE)
+
+TCGA_exp_harmonized_colData <- as.data.frame(TCGA_exp_harmonized_colData)
+TCGA_exp_harmonized_colData$exp_sample_name <- rownames(TCGA_exp_harmonized_colData)
+colnames(TCGA_exp_harmonized_colData) <- c("sample_type", "primary_diagnosis",
+                                           "project_id", "sample_id", 
+                                           "exp_sample_name")
+
+write_fst(TCGA_exp_harmonized_colData,
+          "/path/to/analysis_in_quarto/analysis_in_quarto_files/TCGA_exp_harmonized_colData.fst",
+          compress = 100, uniform_encoding = TRUE)
+
+```
+
+```{r meth_data_frames, cache=TRUE, message=FALSE, echo=FALSE}
+
+TCGA_meth_harmonized_450k_data <- readRDS("/path/to/TCGA_meth_harmonized_450k_data.rds")
+
+for (i in 1:length(TCGA_project_list)){
+  meta_data <- colData(TCGA_meth_harmonized_450k_data[[i]])
+  if (i == 1){
+    TCGA_meth_harmonized_450k_mat <- assay(TCGA_meth_harmonized_450k_data[[i]])
+    TCGA_meth_harmonized_450k_colData <- meta_data[,c("primary_diagnosis",
+                                                      "submitter_id", "sample_type",
+                                                      "gender", "age_at_index",
+                                                      "days_to_death", "sample",
+                                                      "project_id")]
+  }
+  else {
+    TCGA_meth_harmonized_450k_mat <- cbind(TCGA_meth_harmonized_450k_mat,
+                                           assay(TCGA_meth_harmonized_450k_data[[i]]))
+    TCGA_meth_harmonized_450k_colData <- rbind(TCGA_meth_harmonized_450k_colData,
+                                               meta_data[,c("primary_diagnosis",
+                                                            "submitter_id", "sample_type",
+                                                            "gender", "age_at_index",
+                                                            "days_to_death", "sample",
+                                                            "project_id")])
+  }
+}
+
+TCGA_meth_harmonized_450k_mat <- as.data.frame(TCGA_meth_harmonized_450k_mat)
+TCGA_meth_harmonized_450k_colData$sample_id <- rownames(TCGA_meth_harmonized_450k_colData)
+TCGA_meth_harmonized_450k_colData <- as.data.frame(TCGA_meth_harmonized_450k_colData)
+
+write_fst(TCGA_meth_harmonized_450k_mat,
+          "/path/to/analysis_in_quarto/analysis_in_quarto_files/TCGA_meth_harmonized_450k_mat.fst",
+          compress = 100, uniform_encoding = TRUE)
+saveRDS(rownames(TCGA_meth_harmonized_450k_mat),
+          file = "/path/to/analysis_in_quarto/analysis_in_quarto_files/TCGA_meth_harmonized_450k_mat_probes.rds")
+write_fst(TCGA_meth_harmonized_450k_colData,
+          "/path/to/analysis_in_quarto/analysis_in_quarto_files/TCGA_meth_harmonized_450k_colData.fst",
+          compress = 100, uniform_encoding = TRUE)
+
+```
+
+\normalsize
+
+* Above saved files are loaded in the following chunks as they couldn't be saved as cache.
+
+\tiny
+
+```{r load_exp_meth_data, message=FALSE, echo=FALSE}
+
+library(fst, quietly = T)
+
+################## Exp data ##################
+
+TCGA_exp_harmonized_fpkm <- read_fst("/path/to/TCGA_exp_harmonized_fpkm.fst")
+TCGA_exp_harmonized_colData <- read_fst("/path/to/TCGA_exp_harmonized_colData.fst")
+
+rownames(TCGA_exp_harmonized_fpkm) <- TCGA_exp_harmonized_fpkm$genes
+TCGA_exp_harmonized_fpkm <- TCGA_exp_harmonized_fpkm[,1: (ncol(TCGA_exp_harmonized_fpkm) - 1)]
+
+################## Meth data ##################
+
+TCGA_meth_harmonized_450k_mat <- read_fst("/path/to/TCGA_meth_harmonized_450k_mat.fst")
+TCGA_meth_harmonized_450k_colData <- read_fst("/path/to/TCGA_meth_harmonized_450k_colData.fst")
+colnames(TCGA_meth_harmonized_450k_colData) <- c("primary_diagnosis", "submitter_id",
+                                                 "sample_type", "gender", "age_at_index",
+                                                 "days_to_death", "sample_id", "project_id",
+                                                 "meth_sample_name")
+TCGA_meth_harmonized_450k_probes <- readRDS("/path/to/TCGA_meth_harmonized_450k_mat_probes.rds")
+
+rownames(TCGA_meth_harmonized_450k_colData) <- TCGA_meth_harmonized_450k_colData$meth_sample_name
+
+```
+
+\normalsize
+
+## EZHIP expression across tumor types
+
+-   Is EZHIP expressed across all tumor types similarly?
+
+\tiny
+
+```{r EZHIP_exp, fig.height=6, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+ezhip_unstranded_fpkm <- unlist( TCGA_exp_harmonized_fpkm["ENSG00000187690.4",])
+
+ezhip_unstranded_fpkm_df <- data.frame(fpkm = ezhip_unstranded_fpkm,
+                                       log_fpkm = log2(ezhip_unstranded_fpkm + 1),
+                                       sample_type = TCGA_exp_harmonized_colData$sample_type,
+                                       primary_diagnosis = TCGA_exp_harmonized_colData$primary_diagnosis,
+                                       project = TCGA_exp_harmonized_colData$project_id)
+
+ezhip_unstranded_fpkm_df$sample_type <- factor(ezhip_unstranded_fpkm_df$sample_type,
+                                                     levels = unique(ezhip_unstranded_fpkm_df$sample_type))
+ezhip_unstranded_fpkm_df$primary_diagnosis <- factor(ezhip_unstranded_fpkm_df$primary_diagnosis,
+                                                     levels = unique(ezhip_unstranded_fpkm_df$primary_diagnosis))
+ezhip_unstranded_fpkm_df$project <- factor(ezhip_unstranded_fpkm_df$project,
+                                           levels = unique(ezhip_unstranded_fpkm_df$project))
+
+library(ggplot2, quietly = T)
+library(ggbeeswarm, quietly = T)
+
+#### tumor sub-types combined #####
+
+ezhip_log_fpkm <- ggplot(ezhip_unstranded_fpkm_df[! ezhip_unstranded_fpkm_df$sample_type == "Solid Tissue Normal", ], 
+                         aes(x = project, y = log_fpkm, 
+                             color = project, group = project)) +
+  geom_quasirandom(dodge.width=.7, cex=0.01) +
+  stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  ggtitle("EZHIP expression (unstranded fpkm)") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+ezhip_log_fpkm
+
+#### tumor sub-types separately #####
+
+ggplot(ezhip_unstranded_fpkm_df, aes(x = project, y = log_fpkm, 
+                                     color = sample_type, group = sample_type)) +
+  geom_quasirandom(dodge.width=.7, cex=0.01) +
+  stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  ggtitle("EZHIP expression (unstranded fpkm)") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+```
+
+\normalsize
+
+-   Except TGCT, expression levels are quite low in other tumor types
+
+## Methylation levels across tumor types
+
+* Calculate and save row mean and median values. Otherwise, everytime you render the doc, it takes a long time to calculate for this big matrix
+
+\tiny
+
+```{r save_meth_levels, fig.height=6, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+mean_beta_values <- colMeans(TCGA_meth_harmonized_450k_mat, na.rm = TRUE)
+median_beta_values <- colMedians(as.matrix(TCGA_meth_harmonized_450k_mat), na.rm = TRUE)
+
+median_beta_values_df <- data.frame(mean_beta = mean_beta_values,
+                                    median_beta = median_beta_values,
+                                    sample_type = TCGA_meth_harmonized_450k_colData$sample_type,
+                                    primary_diagnosis = TCGA_meth_harmonized_450k_colData$primary_diagnosis,
+                                    project = TCGA_meth_harmonized_450k_colData$project_id)
+
+median_beta_values_df$sample_type <- factor(median_beta_values_df$sample_type,
+                                          levels = unique(median_beta_values_df$sample_type))
+median_beta_values_df$project <- factor(median_beta_values_df$project,
+                                      levels = unique(median_beta_values_df$project))
+
+write_fst(median_beta_values_df,
+          "/path/to/analysis_in_quarto/analysis_in_quarto_files/median_beta_values_df.fst",
+          compress = 100, uniform_encoding = TRUE)
+
+```
+
+
+```{r load_meth_levels, fig.height=6, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+median_beta_values_df <- read_fst("/path/to/median_beta_values_df.fst")
+
+#### tumor sub-types combined #####
+
+mean_beta_values_plot <- ggplot(median_beta_values_df[! median_beta_values_df$sample_type == "Solid Tissue Normal", ], 
+                                aes(x = project, y = mean_beta, 
+                                    color = project, group = project)) +
+  ggtitle("Mean beta values") +
+  geom_quasirandom(dodge.width=.7, cex=0.01) +
+  stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+median_beta_values_plot <- ggplot(median_beta_values_df[! median_beta_values_df$sample_type == "Solid Tissue Normal", ],
+                                  aes(x = project, y = median_beta, 
+                                      color = project, group = project)) +
+  geom_quasirandom(dodge.width=.7, cex=0.01) +
+  stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  ggtitle("Median beta values") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+mean_beta_values_plot
+median_beta_values_plot
+
+```
+
+\normalsize
+
+## Relationship between EZHIP expression and methylation levels around EZHIP promoter region
+
+-   Select the probes within 7kb upstream and downstream of EZHIP TSS.
+
+\tiny
+
+```{r promoter_probes, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+library(data.table, quietly = T)
+library(ggplot2, quietly = T)
+library(GenomicRanges, quietly = T)
+library(dplyr, quietly = T)
+
+manifest_450k <- fread("/path/to/HM450.hg38.manifest.tsv", header = TRUE)
+manifest_450k <- manifest_450k[,c(1,2,3,6,9)]
+colnames(manifest_450k) <- c("chr", "start", "end", "target", "probeID")
+manifest_450k <- manifest_450k[complete.cases(manifest_450k),]
+manifest_450k_gr <- makeGRangesFromDataFrame(manifest_450k, keep.extra.columns = T)
+
+grch38_gtf <- fread("/path/to/hg38.ensGene.gtf.gz")
+grch38_gtf$gene_id <- gsub(".*gene_id \"", "", grch38_gtf$V9) %>% gsub("\";.*", "", .)
+
+grch38_ensmbl_2_geneSymbol <- fread("/path/to/mart_export.txt")
+
+EZHIP_emsmbl <- grch38_ensmbl_2_geneSymbol[grch38_ensmbl_2_geneSymbol$`Gene name` == "EZHIP",]
+EZHIP_emsmbl
+
+grch38_gtf_EZHIP <- grch38_gtf[grch38_gtf$gene_id == "ENSG00000187690",]
+grch38_gtf_EZHIP <- grch38_gtf_EZHIP[,c(1,2,3,4,5,7,10)]
+grch38_gtf_EZHIP <- grch38_gtf_EZHIP[grch38_gtf_EZHIP$V3 == "transcript",]
+colnames(grch38_gtf_EZHIP) <- c("chr", "source", "annotation", "start", "end", "strand", "gene_id")
+
+grch38_gtf_EZHIP_gr <- makeGRangesFromDataFrame(grch38_gtf_EZHIP, keep.extra.columns = T)
+
+grch38_gtf_EZHIP_promoter_gr <- promoters(grch38_gtf_EZHIP_gr, upstream=7000, downstream=7000, use.names=TRUE)
+
+probes_ov_EZHIP_promoter <- findOverlapPairs(manifest_450k_gr, grch38_gtf_EZHIP_promoter_gr, ignore.strand = T)
+probes_ov_EZHIP_promoter <- manifest_450k_gr[manifest_450k_gr$probeID %in% probes_ov_EZHIP_promoter@first$probeID]
+
+length(probes_ov_EZHIP_promoter)
+
+```
+
+\normalsize
+
+-   Only 14 probes around the TSS
+-   Generate a heatmap of all the beta-values of these 14 probes for all the samples (except TGCT) for which expression data is also available
+-   Include EZHIP log2(fpkm + 1) values for all the included samples at the top
+
+\tiny
+
+```{r all_tumortypes_expressing_EZHIP_promoter_probes, fig.height=6, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+library(ComplexHeatmap, quietly = T)
+library(viridis, quietly = T)
+
+EZHIP_prmtr_probes <- TCGA_meth_harmonized_450k_mat[which(TCGA_meth_harmonized_450k_probes 
+                                                          %in% probes_ov_EZHIP_promoter$probeID),
+                                                    which(TCGA_meth_harmonized_450k_colData$project_id 
+                                                          != "TCGA-TGCT")]
+rownames(EZHIP_prmtr_probes) <- TCGA_meth_harmonized_450k_probes[which(TCGA_meth_harmonized_450k_probes 
+                                                          %in% probes_ov_EZHIP_promoter$probeID)]
+
+all_meth_sample_metadata_df <- TCGA_meth_harmonized_450k_colData[TCGA_meth_harmonized_450k_colData$project_id 
+                                                                 != "TCGA-TGCT",]
+
+all_exp_sample_id_df <- TCGA_exp_harmonized_colData[TCGA_exp_harmonized_colData$project_id != "TCGA-TGCT",]
+
+all_exp_sample_id_df <- all_exp_sample_id_df[!duplicated(all_exp_sample_id_df[, "sample_id"]),]
+all_meth_sample_metadata_df <- all_meth_sample_metadata_df[!duplicated(all_meth_sample_metadata_df[,"sample_id"]),]
+
+all_exp_meth_sample_ids_df <-inner_join(all_exp_sample_id_df, 
+                                        all_meth_sample_metadata_df, 
+                                        by = "sample_id")
+
+all_exp_meth_sample_ids_df <- all_exp_meth_sample_ids_df[all_exp_meth_sample_ids_df$exp_sample_name 
+                                                         %in% rownames(ezhip_unstranded_fpkm_df),]
+rownames(all_exp_meth_sample_ids_df) <- all_exp_meth_sample_ids_df$meth_sample_name
+
+samples_with_exp_EZHIP_prmtr_probes <- EZHIP_prmtr_probes[,all_exp_meth_sample_ids_df$meth_sample_name]
+
+annotation_df <- data.frame(log_fpkm = unname(log2(ezhip_unstranded_fpkm[all_exp_meth_sample_ids_df[
+                                colnames(samples_with_exp_EZHIP_prmtr_probes),]$exp_sample_name] + 1)),
+                            project = all_exp_meth_sample_ids_df[
+                              colnames(samples_with_exp_EZHIP_prmtr_probes),]$project_id.y,
+                            row.names = all_exp_meth_sample_ids_df[
+                              colnames(samples_with_exp_EZHIP_prmtr_probes),]$meth_sample_name,
+                            sex = all_exp_meth_sample_ids_df[
+                              colnames(samples_with_exp_EZHIP_prmtr_probes),]$gender,
+                            sample_type = all_exp_meth_sample_ids_df[
+                              colnames(samples_with_exp_EZHIP_prmtr_probes),]$sample_type.y,
+                            age = all_exp_meth_sample_ids_df[
+                              colnames(samples_with_exp_EZHIP_prmtr_probes),]$age_at_index)
+
+annotation_df$sample <- rownames(annotation_df)
+annotation_df <- annotation_df[annotation_df$log_fpkm > 0.2,]
+
+##### split into male and female ########
+
+sex_sorted_annotation_df <- annotation_df[order(annotation_df$sex),]
+
+sex_sorted_primary_normal_df <- sex_sorted_annotation_df[sex_sorted_annotation_df$sample_type == 
+                                                           "Primary Tumor" 
+                                                         | sex_sorted_annotation_df$sample_type == 
+                                                           "Solid Tissue Normal",]
+sex_sorted_primary_normal_df <- sex_sorted_primary_normal_df[!is.na(sex_sorted_primary_normal_df$sex),]
+sex_sorted_primary_normal_df$type <- paste0(sex_sorted_primary_normal_df$sex, " ", 
+                                            sex_sorted_primary_normal_df$sample_type)
+
+probes_wihtin_7K <- manifest_450k[manifest_450k$probeID %in% rownames(samples_with_exp_EZHIP_prmtr_probes),]
+probes_wihtin_7K$dist_from_start <- (probes_wihtin_7K$start + 1) - 51406948
+probes_wihtin_7K <- probes_wihtin_7K[order(dist_from_start),]
+
+heatmap_tumor_type_split <- Heatmap(samples_with_exp_EZHIP_prmtr_probes[probes_wihtin_7K$probeID,
+                                                                sex_sorted_primary_normal_df$sample] %>% as.matrix(),
+                                    top_annotation = 
+                                      HeatmapAnnotation(project = sex_sorted_primary_normal_df$project,
+                                                        sex = factor(sex_sorted_primary_normal_df$type,
+                                                          levels =  c("female Solid Tissue Normal",
+                                                                      "female Primary Tumor",
+                                                                      "male Solid Tissue Normal",
+                                                                      "male Primary Tumor")),
+                                                        age = log2(sex_sorted_primary_normal_df$age + 1),
+                                                        log_fpkm = sex_sorted_primary_normal_df$log_fpkm,
+                                                        col = list(sex = c("female Solid Tissue Normal" = "red",
+                                                                           "female Primary Tumor" = "#E64B35FF", 
+                                                                           "male Solid Tissue Normal" = "blue",
+                                                                           "male Primary Tumor" = "#4DBBD5FF"))),
+                                    column_split = factor(sex_sorted_primary_normal_df$type,
+                                                          levels =  c("female Solid Tissue Normal",
+                                                                      "female Primary Tumor",
+                                                                      "male Solid Tissue Normal",
+                                                                      "male Primary Tumor")),
+                                    cluster_rows = FALSE,
+                                    show_column_dend = FALSE,
+                                    col = viridis(n = 256, alpha = 1, 
+                                                  begin = 0, end = 1,
+                                                  option = "viridis"),
+                                    show_column_names = FALSE,
+                                    na_col = "Grey")
+heatmap_tumor_type_split
+
+#######################################################################
+
+sex_sorted_primary_normal_5th_df <- sex_sorted_primary_normal_df
+sex_sorted_primary_normal_5th_df$cg20546893 <- as.numeric(samples_with_exp_EZHIP_prmtr_probes["cg20546893", sex_sorted_primary_normal_df$sample])
+sex_sorted_primary_normal_5th_df$cg14505980 <- as.numeric(samples_with_exp_EZHIP_prmtr_probes["cg14505980", sex_sorted_primary_normal_df$sample])
+sex_sorted_primary_normal_5th_df$cg20931907 <- as.numeric(samples_with_exp_EZHIP_prmtr_probes["cg20931907", sex_sorted_primary_normal_df$sample])
+sex_sorted_primary_normal_5th_df$cg11132751 <- as.numeric(samples_with_exp_EZHIP_prmtr_probes["cg11132751", sex_sorted_primary_normal_df$sample])
+
+ggplot(sex_sorted_primary_normal_5th_df, aes(x = project, y = log_fpkm, 
+                                             color = cg20546893)) +
+  geom_quasirandom(dodge.width=.7, cex=0.5) +
+  stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  ggtitle("EZHIP expression (unstranded fpkm)") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+ggplot(sex_sorted_primary_normal_5th_df[sex_sorted_primary_normal_5th_df$sex == "male",], aes(x = project, y = log_fpkm, 
+                                             color = cg14505980)) +
+  geom_quasirandom(dodge.width=.7, cex=0.5) +
+  stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  ggtitle("EZHIP expression (unstranded fpkm)") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+ggplot(sex_sorted_primary_normal_5th_df, aes(x = project, y = log_fpkm, 
+                                             color = cg20931907)) +
+  geom_quasirandom(dodge.width=.7, cex=0.5) +
+  stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  ggtitle("EZHIP expression (unstranded fpkm)") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+ggplot(sex_sorted_primary_normal_5th_df, aes(x = project, y = log_fpkm, 
+                                             color = cg11132751)) +
+  geom_quasirandom(dodge.width=.7, cex=0.5) +
+  stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  ggtitle("EZHIP expression (unstranded fpkm)") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+```
+
+\normalsize
+
+-   Probes 5,7,9 appear to be more methylation across the female samples.
+-   Since the relationship between methylation and expression is not clear through this visualization, carry out a correlation analysis
+
+### Correlation between EZHIP expression and promoter methylation
+
+-   Plot beta values on x-axis and log2(fpkm + 1) values on y-axis for each of the 14 probes
+-   fit a linear model
+-   Calculate R\^2 values and plot as a function of distance from TSS
+
+\tiny
+
+```{r plot_meth_exp_corr, fig.height=12, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+library(ggpubr, quietly = T)
+
+annotation_df$sample_id <- rownames(annotation_df)
+
+meth_exp_df <- t(samples_with_exp_EZHIP_prmtr_probes) %>% as.data.frame()
+meth_exp_df$sample_id <- rownames(meth_exp_df)
+
+meth_exp_df <- inner_join(meth_exp_df, annotation_df, by = "sample_id")
+
+meth_exp_df$project <- factor(meth_exp_df$project,
+                                        levels = unique(meth_exp_df$project))
+meth_exp_df$sex <- factor(meth_exp_df$sex,
+                          levels = unique(meth_exp_df$sex))
+
+male_plots <- list()
+female_plots <- list()
+male_age_plots <- list()
+female_age_plots <- list()
+male_age_ezhip_exp_plots <- list()
+female_age_ezhip_exp_plots <- list()
+
+male_R_squared <- c()
+female_R_squared <- c()
+male_age_R_squared <- c()
+female_age_R_squared <- c()
+male_age_ezhip_exp_R_squared <- c()
+female_age_ezhip_exp_R_squared <- c()
+
+for (i in 1:14){
+  
+  probe_id = probes_wihtin_7K$probeID[i]
+  plot_df <- meth_exp_df[meth_exp_df[,probes_wihtin_7K$probeID[i]] != -1,]
+  plot_df <- plot_df[,c(probes_wihtin_7K$probeID[i], "log_fpkm", "project", "sample_type", "sex", "age")]
+  
+  colnames(plot_df) <- c("beta_value", "log_fpkm", "project", "sample_type", "sex", "age")
+  plot_df <- plot_df[plot_df$sample_type == "Primary Tumor",]
+  plot_df <- plot_df[!is.na(plot_df),]
+  
+  male_R_squared[i] <- summary(lm(log_fpkm ~ beta_value, 
+                              data = plot_df[plot_df$sex == "male",] ))$r.squared
+  female_R_squared[i] <- summary(lm(log_fpkm ~ beta_value, 
+                              data = plot_df[plot_df$sex == "female",] ))$r.squared
+  male_age_R_squared[i] <- summary(lm(beta_value ~ age, 
+                              data = plot_df[plot_df$sex == "male",] ))$r.squared
+  female_age_R_squared[i] <- summary(lm(beta_value ~ age, 
+                              data = plot_df[plot_df$sex == "female",] ))$r.squared
+  male_age_ezhip_exp_R_squared[i] <- summary(lm(log_fpkm ~ age , 
+                              data = plot_df[plot_df$sex == "male",] ))$r.squared
+  female_age_ezhip_exp_R_squared[i] <- summary(lm(log_fpkm ~ age, 
+                              data = plot_df[plot_df$sex == "female",] ))$r.squared
+  
+  plot_df$sex <- factor(plot_df$sex,
+                       levels =  unique(plot_df$sex))
+  plot_df$age <- log2(plot_df$age + 1)
+  
+  male_plot <- ggplot(plot_df[plot_df$sex == "male",], aes(x = beta_value, y = log_fpkm)) +
+    geom_smooth(method = "lm", formula = y ~  x, alpha = .15) +
+    scale_color_manual(values=c("#4DBBD5FF"),
+                       labels = c("male")) +
+    stat_cor( aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+              label.y.npc="top", label.x.npc = "left") +
+    geom_point(aes(colour = sex), alpha = 0.5) +
+    ggtitle(probe_id) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1)) +
+  xlim(0, 1)
+  
+  female_plot <- ggplot(plot_df[plot_df$sex == "female",], aes(x = beta_value, y = log_fpkm)) +
+    geom_smooth(method = "lm", formula = y ~  x, alpha = .15) +
+    scale_color_manual(values=c("#E64B35FF"),
+                       labels = c("female")) +
+    stat_cor( aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+              label.y.npc="top", label.x.npc = "left") +
+    geom_point(aes(colour = sex), alpha = 0.5) +
+    ggtitle(probe_id) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1)) +
+  xlim(0, 1)
+  
+  male_age_plot <- ggplot(plot_df[plot_df$sex == "male",], aes(x = beta_value, y = age)) +
+    geom_smooth(method = "lm", formula = y ~  x, alpha = .15) +
+    scale_color_manual(values=c("#4DBBD5FF"),
+                       labels = c("male")) +
+    stat_cor( aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+              label.y.npc="top", label.x.npc = "left") +
+    geom_point(aes(colour = sex), alpha = 0.5) +
+    ggtitle(probe_id) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1)) +
+  xlim(0, 1)
+  
+  female_age_plot <- ggplot(plot_df[plot_df$sex == "female",], aes(x = beta_value, y = age)) +
+    geom_smooth(method = "lm", formula = y ~  x, alpha = .15) +
+    scale_color_manual(values=c("#E64B35FF"),
+                       labels = c("female")) +
+    stat_cor( aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+              label.y.npc="top", label.x.npc = "left") +
+    geom_point(aes(colour = sex), alpha = 0.5) +
+    ggtitle(probe_id) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1)) +
+  xlim(0, 1)
+  
+  male_age_ezhip_exp_plot <- ggplot(plot_df[plot_df$sex == "male",], aes(y = age, x = log_fpkm)) +
+    geom_smooth(method = "lm", formula = y ~  x, alpha = .15) +
+    scale_color_manual(values=c("#4DBBD5FF"),
+                       labels = c("male")) +
+    stat_cor( aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+              label.y.npc="top", label.x.npc = "left") +
+    geom_point(aes(colour = sex), alpha = 0.5) +
+    ggtitle(probe_id) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1)) +
+  xlim(0, 1)
+  
+  female_age_ezhip_exp_plot <- ggplot(plot_df[plot_df$sex == "female",], aes(y = age, x = log_fpkm)) +
+    geom_smooth(method = "lm", formula = y ~  x, alpha = .15) +
+    scale_color_manual(values=c("#E64B35FF"),
+                       labels = c("female")) +
+    stat_cor( aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+              label.y.npc="top", label.x.npc = "left") +
+    geom_point(aes(colour = sex), alpha = 0.5) +
+    ggtitle(probe_id) +
+    theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1)) +
+  xlim(0, 1)
+  
+  male_plots[[i]] <- male_plot
+  female_plots[[i]] <- female_plot
+  male_age_plots[[i]] <- male_age_plot
+  female_age_plots[[i]] <- female_age_plot
+  male_age_ezhip_exp_plots[[i]] <- male_age_ezhip_exp_plot
+  female_age_ezhip_exp_plots[[i]] <- female_age_ezhip_exp_plot
+}
+
+probes_wihtin_7K$male_r_squared <- male_R_squared
+probes_wihtin_7K$female_r_squared <- female_R_squared
+probes_wihtin_7K$male_age_r_squared <- male_age_R_squared
+probes_wihtin_7K$female_age_r_squared <- female_age_R_squared
+probes_wihtin_7K$male_age_ezhip_exp_r_squared <- male_age_ezhip_exp_R_squared
+probes_wihtin_7K$female_age_ezhip_exp_r_squared <- female_age_ezhip_exp_R_squared
+
+male_r_sqrd_plot <- ggplot(probes_wihtin_7K, aes(x = dist_from_start, y = male_r_squared)) +
+  geom_point() +
+  geom_line() +
+  ggtitle("R-squared vs distance from EZHIP start") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+female_r_sqrd_plot <- ggplot(probes_wihtin_7K, aes(x = dist_from_start, y = female_r_squared)) +
+  geom_point() +
+  geom_line() +
+  ggtitle("R-squared vs distance from EZHIP start") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+male_age_r_sqrd_plot <- ggplot(probes_wihtin_7K, aes(x = dist_from_start, y = male_age_r_squared)) +
+  geom_point() +
+  geom_line() +
+  ggtitle("R-squared vs distance from EZHIP start") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+female_age_r_sqrd_plot <- ggplot(probes_wihtin_7K, aes(x = dist_from_start, y = female_age_r_squared)) +
+  geom_point() +
+  geom_line() +
+  ggtitle("R-squared vs distance from EZHIP start") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+male_age_ezhip_exp_r_sqrd_plot <- ggplot(probes_wihtin_7K, aes(x = dist_from_start, y = male_age_ezhip_exp_r_squared)) +
+  geom_point() +
+  geom_line() +
+  ggtitle("R-squared vs distance from EZHIP start") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+female_age_ezhip_exp_r_sqrd_plot <- ggplot(probes_wihtin_7K, aes(x = dist_from_start, y = female_age_ezhip_exp_r_squared)) +
+  geom_point() +
+  geom_line() +
+  ggtitle("R-squared vs distance from EZHIP start") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1))
+
+male_plots[[length(male_plots) + 1]] <- male_r_sqrd_plot
+female_plots[[length(female_plots) + 1]] <- female_r_sqrd_plot
+male_age_plots[[length(male_age_plots) + 1]] <- male_age_r_sqrd_plot
+female_age_plots[[length(female_age_plots) + 1]] <- female_age_r_sqrd_plot
+male_age_ezhip_exp_plots[[length(male_age_ezhip_exp_plots) + 1]] <- male_age_ezhip_exp_r_sqrd_plot
+female_age_ezhip_exp_plots[[length(female_age_ezhip_exp_plots) + 1]] <- female_age_ezhip_exp_r_sqrd_plot
+
+ggarrange(plotlist = male_plots, ncol = 4, nrow = 4)
+ggarrange(plotlist = female_plots, ncol = 4, nrow = 4)
+ggarrange(plotlist = male_age_plots, ncol = 4, nrow = 4)
+ggarrange(plotlist = female_age_plots, ncol = 4, nrow = 4)
+ggarrange(plotlist = male_age_ezhip_exp_plots, ncol = 4, nrow = 4)
+ggarrange(plotlist = female_age_ezhip_exp_plots, ncol = 4, nrow = 4)
+
+```
+
+\normalsize
+
+-   Correlation coefficient appears to be low. However, the general trend is going up closer to TSS.
+-   How does median methylation look like between sexes?
+
+## Methylation levels in males and females
+
+-   Plot beeswarm plots for all 14 probes separated by sexes and condition (normal or primary tumor)
+
+\tiny
+
+```{r beeswarm_meth_btw_sex, fig.height=5, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+################################################################
+############# all 14 probes primary tumor & normal #############
+################################################################
+
+sex_sorted_primary_normal_annot_df <- sex_sorted_annotation_df[ !is.na(sex_sorted_annotation_df$sex) & 
+                                                                  (sex_sorted_annotation_df$sample_type == "Primary Tumor" 
+                                                                   | sex_sorted_annotation_df$sample_type == "Solid Tissue Normal"),]
+sex_sorted_primary_normal_annot_df$type <- paste0(sex_sorted_primary_normal_annot_df$sex,
+                                                  " ", 
+                                                  sex_sorted_primary_normal_annot_df$sample_type)
+  
+all_probes_primary_normal <- data.frame(beta_value = 
+                                          as.vector(t(samples_with_exp_EZHIP_prmtr_probes[
+                                            probes_wihtin_7K$probeID,
+                                            sex_sorted_primary_normal_annot_df$sample])),
+                                        sex = rep(sex_sorted_primary_normal_annot_df$type, 
+                                                  nrow(samples_with_exp_EZHIP_prmtr_probes[
+                                                    ,sex_sorted_primary_normal_annot_df$sample])),
+                                        probe = rep(probes_wihtin_7K$probeID, 
+                                                    each = ncol(samples_with_exp_EZHIP_prmtr_probes[
+                                                      ,sex_sorted_primary_normal_annot_df$sample])),
+                                        distance_from_TSS = as.character(
+                                          rep(probes_wihtin_7K$dist_from_start, 
+                                              each = ncol(samples_with_exp_EZHIP_prmtr_probes[
+                                                ,sex_sorted_primary_normal_annot_df$sample]))))
+
+all_probes_primary_normal$sex <- factor(all_probes_primary_normal$sex,
+                                        levels = c("female Solid Tissue Normal", 
+                                                   "female Primary Tumor",
+                                                   "male Solid Tissue Normal",
+                                                   "male Primary Tumor"))
+all_probes_primary_normal$probe <- factor(all_probes_primary_normal$probe,
+                                          levels = unique(all_probes_primary_normal$probe))
+all_probes_primary_normal$distance_from_TSS <- factor(all_probes_primary_normal$distance_from_TSS,
+                                                      levels = unique(all_probes_primary_normal$distance_from_TSS))
+
+all_probes_primary_normal <- all_probes_primary_normal[!is.na(all_probes_primary_normal$sex),]
+
+all_probes_primary_normal_plt <- ggplot(all_probes_primary_normal, 
+                                        aes(x = distance_from_TSS, 
+                                            y = beta_value, 
+                                            group = sex, color = sex)) +
+ geom_quasirandom(dodge.width=.7, cex=0.01) +
+ stat_summary(fun = median, na.rm = TRUE, 
+               geom = "crossbar",
+               size = 0.5, width = 0.5, color = "black", 
+               position = position_dodge(width = .7)) +
+  ggtitle("all 14 probes Beta Values") +
+  theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 1), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1)) +
+  scale_color_manual(values=c("red", "#E64B35FF",
+                               "blue", "#4DBBD5FF"),
+                       labels = c("female Solid Tissue Normal", 
+                                  "female Primary Tumor",
+                                  "male Solid Tissue Normal",
+                                  "male Primary Tumor")) +
+  guides(color = guide_legend(override.aes = list(size = 2)))
+
+all_probes_primary_normal_plt
+
+```
+
+\normalsize
+
+-   In these probes, females appear to have lesser median beta values compared to males
+-   Is this a chromosome-wide and genome-wide pattern?
+
+### Genome-wide methylation differences between males and females
+
+-   Plot the frequency and density plots of difference of median beta value between and females for all chromosomes
+
+\tiny
+
+```{r methylation_diff_chrom_wide, warning=FALSE, message=FALSE, echo=FALSE}
+
+library(SingleCellExperiment, quietly = T)
+
+manifest_450k_odered <- manifest_450k[order(manifest_450k$chr,
+                                            manifest_450k$start, 
+                                            manifest_450k$end),]
+manifest_450k_odered$locus <- manifest_450k_odered$start + 1
+
+ ### drop probes with NA's in all the samples
+
+na_omitted_all_chr_tumor_probes <- TCGA_meth_harmonized_450k_mat[,
+                                                    which(TCGA_meth_harmonized_450k_colData$project_id 
+                                                          != "TCGA-TGCT")]
+
+all_chr_tumors_meth_sample_id_df <- all_meth_sample_metadata_df
+
+######### separate female samples from males #########
+
+# females
+
+all_chr_tumors_meth_sample_id_female_PT_df <- 
+  all_chr_tumors_meth_sample_id_df[
+    all_chr_tumors_meth_sample_id_df$gender == "female" 
+    & all_chr_tumors_meth_sample_id_df$sample_type == "Primary Tumor",]
+
+all_chr_tumors_meth_sample_id_female_PT_df <- 
+  all_chr_tumors_meth_sample_id_female_PT_df[
+    !is.na(all_chr_tumors_meth_sample_id_female_PT_df$gender),]
+
+all_chr_tumors_meth_sample_id_female_NT_df <-
+  all_chr_tumors_meth_sample_id_df[
+    all_chr_tumors_meth_sample_id_df$gender == "female" 
+    & all_chr_tumors_meth_sample_id_df$sample_type == "Solid Tissue Normal",]
+
+all_chr_tumors_meth_sample_id_female_NT_df <- 
+  all_chr_tumors_meth_sample_id_female_NT_df[
+    !is.na(all_chr_tumors_meth_sample_id_female_NT_df$gender),]
+
+# males
+
+all_chr_tumors_meth_sample_id_male_PT_df <- all_chr_tumors_meth_sample_id_df[
+  all_chr_tumors_meth_sample_id_df$gender == "male" 
+  & all_chr_tumors_meth_sample_id_df$sample_type == "Primary Tumor",]
+all_chr_tumors_meth_sample_id_male_PT_df <- all_chr_tumors_meth_sample_id_male_PT_df[
+  !is.na(all_chr_tumors_meth_sample_id_male_PT_df$gender),]
+
+all_chr_tumors_meth_sample_id_male_NT_df <- all_chr_tumors_meth_sample_id_df[
+  all_chr_tumors_meth_sample_id_df$gender == "male" 
+  & all_chr_tumors_meth_sample_id_df$sample_type == "Solid Tissue Normal",]
+all_chr_tumors_meth_sample_id_male_NT_df <- all_chr_tumors_meth_sample_id_male_NT_df[
+  !is.na(all_chr_tumors_meth_sample_id_male_NT_df$gender),]
+
+######## separate female assays dfrom males ##########
+
+# females
+
+na_omitted_all_chr_tumor_probes_female_PT <-
+  na_omitted_all_chr_tumor_probes[,all_chr_tumors_meth_sample_id_female_PT_df$meth_sample_name]
+na_omitted_all_chr_tumor_probes_female_NT <- 
+  na_omitted_all_chr_tumor_probes[,all_chr_tumors_meth_sample_id_female_NT_df$meth_sample_name]
+
+# males
+
+na_omitted_all_chr_tumor_probes_male_PT <- 
+  na_omitted_all_chr_tumor_probes[,all_chr_tumors_meth_sample_id_male_PT_df$meth_sample_name]
+na_omitted_all_chr_tumor_probes_male_NT <- 
+  na_omitted_all_chr_tumor_probes[,all_chr_tumors_meth_sample_id_male_NT_df$meth_sample_name]
+
+```
+
+```{r plot_median_probes_diff_1, fig.height=12, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+manifest_450k <- fread("/path/to/HM450.hg38.manifest.tsv", header = TRUE)
+manifest_450k <- manifest_450k[,c(1,2,3,6,9)]
+colnames(manifest_450k) <- c("chr", "start", "end", "target", "probeID")
+manifest_450k <- manifest_450k[complete.cases(manifest_450k),]
+
+manifest_450k_odered <- manifest_450k[order(manifest_450k$chr, manifest_450k$start, manifest_450k$end),]
+manifest_450k_odered$locus <- manifest_450k_odered$start + 1
+
+```
+
+
+```{r plot_median_probes_diff_2, fig.height=12, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+######## calculate medians for each probe ###########
+
+female_PT_probe_medians <- rowMedians(as.matrix(na_omitted_all_chr_tumor_probes_female_PT),
+                                      na.rm = TRUE)
+female_NT_probe_medians <- rowMedians(as.matrix(na_omitted_all_chr_tumor_probes_female_NT),
+                                      na.rm = TRUE)
+
+male_PT_probe_medians <- rowMedians(as.matrix(na_omitted_all_chr_tumor_probes_male_PT),
+                                      na.rm = TRUE)
+male_NT_probe_medians <- rowMedians(as.matrix(na_omitted_all_chr_tumor_probes_male_NT),
+                                      na.rm = TRUE)
+
+```
+
+
+```{r plot_median_probes_diff_3, fig.height=12, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+######## calculate median differences for each probe ###########
+
+female_male_median_diff <- data.frame(probeID = TCGA_meth_harmonized_450k_probes[as.numeric(rownames(na_omitted_all_chr_tumor_probes_female_PT))],
+                                      female_PT_probe_medians = female_PT_probe_medians,
+                                      female_NT_probe_medians = female_NT_probe_medians,
+                                      male_PT_probe_medians = male_PT_probe_medians,
+                                      male_NT_probe_medians = male_NT_probe_medians,
+                                      PT_diff = female_PT_probe_medians - male_PT_probe_medians,
+                                      NT_diff = female_NT_probe_medians - male_NT_probe_medians)
+
+female_male_median_diff <- inner_join(female_male_median_diff, manifest_450k_odered, by="probeID")
+
+female_male_median_diff <- female_male_median_diff[order(female_male_median_diff$chr,
+                                                         female_male_median_diff$start,
+                                                         female_male_median_diff$end),]
+
+```
+
+
+```{r plot_median_probes_diff_4, fig.height=12, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+####### generate a frequency plot (all chr) ##########
+
+female_male_median_diff_ggdf <- data.frame(probeID = rep(female_male_median_diff$probeID, 2),
+                                           chr = rep(female_male_median_diff$chr, 2),
+                                           locus = rep(as.character(female_male_median_diff$locus), 2),
+                                           median_diff = c(female_male_median_diff$PT_diff,
+                                                           female_male_median_diff$NT_diff),
+                                           condition = c(rep("Primary Tumor", 
+                                                             nrow(female_male_median_diff)),
+                                                         rep("Solid Tissue Normal", 
+                                                             nrow(female_male_median_diff))))
+
+female_male_median_diff_ggdf <- female_male_median_diff_ggdf[! is.na(female_male_median_diff_ggdf$median_diff),]
+
+female_male_median_diff_ggdf$condition <- factor(female_male_median_diff_ggdf$condition,
+                                               levels = c("Solid Tissue Normal",
+                                                          "Primary Tumor"))
+
+female_male_median_diff_ggdf$chr <- factor(female_male_median_diff_ggdf$chr,
+                                           levels = unique(female_male_median_diff_ggdf$chr))
+
+female_male_median_diff_ggdf$locus <- factor(female_male_median_diff_ggdf$locus,
+                                             levels = unique(female_male_median_diff_ggdf$locus))
+
+female_male_median_diff_ggdf_plt <- ggplot(female_male_median_diff_ggdf, 
+                                           aes(x = median_diff,color = condition)) +
+                                           geom_freqpoly(bins = 50) +
+                                           facet_wrap(~ chr) +
+                                           ggtitle("Frequency plot - Difference between median beta values (female - male)") +
+                                           theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+                                                 strip.background = element_blank(),
+                                                 strip.text.x = element_text(size = 14),
+                                                 panel.border = element_rect(color = "black", fill = NA, size = 1), 
+                                                 panel.grid.major = element_blank(), 
+                                                 panel.grid.minor = element_blank(), 
+                                                 panel.background = element_blank(), 
+                                                 axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+                                                 axis.text.y= element_text(size = 14, hjust = 1)) +
+                                          scale_x_continuous(name="Median difference", 
+                                                             limits=c(-0.5,0.5,0.1))
+
+female_male_median_diff_ggdf_density_plt <- ggplot(female_male_median_diff_ggdf[female_male_median_diff_ggdf$chr != "chrY",], 
+                                                   aes(x = median_diff, y = ..scaled.. , color = condition)) +
+                                           geom_density() +
+                                           facet_wrap(~ chr) +
+                                           ggtitle("Density plot - Difference between median beta values (female - male)") +
+                                           theme(plot.title = element_text(hjust = 0.5, color="black", size=14,face="bold"),
+                                                 strip.background = element_blank(),
+                                                 strip.text.x = element_text(size = 14),
+                                                 panel.border = element_rect(color = "black", fill = NA, size = 1), 
+                                                 panel.grid.major = element_blank(), 
+                                                 panel.grid.minor = element_blank(), 
+                                                 panel.background = element_blank(), 
+                                                 axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+                                                 axis.text.y= element_text(size = 14, hjust = 1)) +
+                                          scale_x_continuous(name="Median difference", 
+                                                             limits=c(-0.5,0.5,0.1))
+
+
+female_male_median_diff_ggdf_plt
+female_male_median_diff_ggdf_density_plt
+
+```
+
+
+```{r plot_median_probes_diff_5, fig.height=6, fig.width=16, warning=FALSE, cache=TRUE, message=FALSE, echo=FALSE}
+
+####### chrX and chr12 #########
+
+female_male_median_diff_chrX_ggdf <- 
+  female_male_median_diff_ggdf[female_male_median_diff_ggdf$chr == "chrX",]
+
+female_male_median_diff_chrX_ggdf_plt <- ggplot(female_male_median_diff_chrX_ggdf, 
+                                                aes(x = median_diff, color = condition)) +
+                                           geom_freqpoly(bins = 50) +
+                                           facet_wrap(~ chr) +
+                                           ggtitle("Frequency plot - Difference between median beta values (female - male)") +
+                                           theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+                                                 strip.background = element_blank(),
+                                                 strip.text.x = element_text(size = 14),
+                                                 panel.border = element_rect(color = "black", fill = NA, size = 1), 
+                                                 panel.grid.major = element_blank(), 
+                                                 panel.grid.minor = element_blank(), 
+                                                 panel.background = element_blank(), 
+                                                 axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+                                                 axis.text.y= element_text(size = 14, hjust = 1)) +
+                                          scale_x_continuous(name="Median difference", 
+                                                             limits=c(-0.5,0.5,0.1))
+
+female_male_median_diff_chr21_ggdf <- 
+  female_male_median_diff_ggdf[female_male_median_diff_ggdf$chr == "chr21",]
+
+female_male_median_diff_chr21_ggdf_plt <- ggplot(female_male_median_diff_chr21_ggdf, 
+                                                 aes(x = median_diff, color = condition)) +
+                                           geom_freqpoly(bins = 50) +
+                                           facet_wrap(~ chr) +
+                                           theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+                                                 strip.background = element_blank(),
+                                                 strip.text.x = element_text(size = 14),
+                                                 panel.border = element_rect(color = "black", fill = NA, size = 1), 
+                                                 panel.grid.major = element_blank(), 
+                                                 panel.grid.minor = element_blank(), 
+                                                 panel.background = element_blank(), 
+                                                 axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+                                                 axis.text.y= element_text(size = 14,  hjust = 1)) +
+                                          scale_x_continuous(name="Median difference", 
+                                                             limits=c(-0.5,0.5,0.1)) + 
+                                          scale_y_continuous(name="Median difference", 
+                                                             limits=c(0,120,30))
+
+ggarrange(female_male_median_diff_chrX_ggdf_plt, 
+          female_male_median_diff_chr21_ggdf_plt, 
+          nrow = 1, ncol=2)
+
+```
+
+\normalsize
+
+-   The difference in methylation levels between males and femnales appear to be X-chromosome specific.
+-   There's a bimodal distribution of difference in beta values.
+-   It will be interesting to observe which probes have positive(more methylation in females) and negative (more methylation in males) differences.
+-   Also, what does the distribution of these probes align with (A/B copmartments, PAR's)?
+-   Are there specific tumor-types that are driving these difference while the other remain neutral?
+* Is there a replication dependent mechanism?
+
+### Locus-wise methylation difference between males and females
+
+\tiny
+
+```{r locus_methylation, warning=FALSE, cache=TRUE, message=FALSE, fig.height=6, fig.width=16, echo=FALSE}
+
+library(Gviz)
+library(GWASTools)
+
+########## CpG Islands ###########
+
+cpgIslands <- fread("/path/to/hg38_CpG_Island.bed")
+colnames(cpgIslands) <- c("chr", "start", "end", "CpG_id")
+cpgIslands$strand <- rep("*", nrow(cpgIslands))
+cpgIslands_gr <- makeGRangesFromDataFrame(cpgIslands, 
+                                       keep.extra.columns = T)
+cpgIslands_track <- AnnotationTrack(cpgIslands_gr, name = "CpG")
+
+####### Pseudoautosomal regions ##########
+
+data(pseudoautosomal.hg38)
+colnames(pseudoautosomal.hg38) <- c("chr", "id", "start", "end")
+pseudoautosomal.hg38_gr <- makeGRangesFromDataFrame(pseudoautosomal.hg38,
+                                                    keep.extra.columns = T)
+PAR_track <- AnnotationTrack(pseudoautosomal.hg38_gr, name = "PAR")
+
+######## meth diff chrX #############
+
+female_male_median_diff_chrX <- female_male_median_diff[female_male_median_diff$chr == "chrX", 
+                                                        c("chr", "start", "end",
+                                                          "PT_diff", "NT_diff")]
+female_male_median_diff_chrX <- female_male_median_diff_chrX[! is.na(female_male_median_diff_chrX$PT_diff),]
+
+female_male_median_diff_chrX$baseline <- rep(0, nrow(female_male_median_diff_chrX))
+
+female_male_median_diff_chrX_gr <- makeGRangesFromDataFrame(female_male_median_diff_chrX, 
+                                                            keep.extra.columns = T)
+
+female_male_median_diff_chrX_dTrack <- DataTrack(female_male_median_diff_chrX_gr)
+
+plotTracks(c(female_male_median_diff_chrX_dTrack, PAR_track,
+             cpgIslands_track), 
+           groups = c("Primary Tumor", "Solid Tissue Normal", "baseline"), 
+           type = c("h"), aggregateGroups = TRUE, ylim=c(-1,1), sizes = c(0.40, 0.10, 0.40))
+
+######## meth diff chr21 #############
+
+female_male_median_diff_chr21 <- female_male_median_diff[female_male_median_diff$chr == "chr21", 
+                                                        c("chr", "start", "end",
+                                                          "PT_diff", "NT_diff")]
+female_male_median_diff_chr21 <- female_male_median_diff_chr21[! is.na(female_male_median_diff_chr21$PT_diff),]
+female_male_median_diff_chr21$baseline <- rep(0, nrow(female_male_median_diff_chr21))
+
+female_male_median_diff_chr21_gr <- makeGRangesFromDataFrame(female_male_median_diff_chr21, 
+                                                            keep.extra.columns = T)
+
+female_male_median_diff_chr21_dTrack <- DataTrack(female_male_median_diff_chr21_gr)
+
+plotTracks(c(female_male_median_diff_chr21_dTrack,
+             cpgIslands_track), 
+           groups = c("Primary Tumor", "Solid Tissue Normal", "baseline"), 
+           type = c("h"), aggregateGroups = TRUE, ylim=c(-1,1), sizes = c(0.50, 0.50))
+```
+
+\normalsize
+
+### Are there specific tumor-types that are driving these difference while the other remain neutral?
+
+\tiny
+
+```{r chrX_meth_diff_across_tumors_1, warning=FALSE, cache=TRUE, message=FALSE, fig.height=6, fig.width=16, echo=FALSE}
+
+library(dplyr)
+library(tidyr)
+
+manifest_450k_odered_chrX <- manifest_450k_odered[manifest_450k_odered$chr == "chrX",]
+chrX_probes_index <- which(TCGA_meth_harmonized_450k_probes %in% manifest_450k_odered_chrX$probeID)
+
+################# female chrX probe medians #############
+
+female_PT_projects <- unique(all_chr_tumors_meth_sample_id_female_PT_df$project_id)
+  
+for (i in 1:length(female_PT_projects)){
+  curr_project <- female_PT_projects[i]
+  curr_assay <- na_omitted_all_chr_tumor_probes_female_PT[chrX_probes_index,
+                                                          all_chr_tumors_meth_sample_id_female_PT_df[
+                                                            all_chr_tumors_meth_sample_id_female_PT_df$project_id 
+                                                            == female_PT_projects[i],]$meth_sample_name]
+  if (i == 1){
+    chrX_female_PT_median_by_project <- data.frame(female_PT = rowMedians(as.matrix(curr_assay), na.rm = TRUE),
+                                                   project = rep(curr_project, length(chrX_probes_index)),
+                                                   probeID = TCGA_meth_harmonized_450k_probes[chrX_probes_index])
+  }
+  else{
+    chrX_female_PT_median_by_project <- rbind(chrX_female_PT_median_by_project,
+                                              data.frame(female_PT = rowMedians(as.matrix(curr_assay), na.rm = TRUE),
+                                                         project = rep(curr_project, length(chrX_probes_index)),
+                                                         probeID = TCGA_meth_harmonized_450k_probes[chrX_probes_index]))
+  }
+}
+
+################# male chrX probe medians #############
+
+male_PT_projects <- unique(all_chr_tumors_meth_sample_id_male_PT_df$project_id)
+  
+for (i in 1:length(male_PT_projects)){
+  curr_project <- male_PT_projects[i]
+  curr_assay <- na_omitted_all_chr_tumor_probes_male_PT[chrX_probes_index,
+                                                          all_chr_tumors_meth_sample_id_male_PT_df[
+                                                            all_chr_tumors_meth_sample_id_male_PT_df$project_id 
+                                                            == male_PT_projects[i],]$meth_sample_name]
+  if (i == 1){
+    chrX_male_PT_median_by_project <- data.frame(male_PT = rowMedians(as.matrix(curr_assay), na.rm = TRUE),
+                                                 project = rep(curr_project, length(chrX_probes_index)),
+                                                 probeID = TCGA_meth_harmonized_450k_probes[chrX_probes_index])
+  }
+  else{
+    chrX_male_PT_median_by_project <- rbind(chrX_male_PT_median_by_project,
+                                            data.frame(male_PT = rowMedians(as.matrix(curr_assay), na.rm = TRUE),
+                                                       project = rep(curr_project, length(chrX_probes_index)),
+                                                       probeID = TCGA_meth_harmonized_450k_probes[chrX_probes_index]))
+  }
+}
+
+################ median difference #################
+
+chrX_female_PT_median_by_project_ov_male <- chrX_female_PT_median_by_project[chrX_female_PT_median_by_project$project 
+                                                                             %in% chrX_male_PT_median_by_project$project,]
+chrX_male_PT_median_by_project_ov_female <- chrX_male_PT_median_by_project[chrX_male_PT_median_by_project$project 
+                                                                           %in% chrX_female_PT_median_by_project$project,]
+
+chrX_female_male_PT_median_by_project <- cbind(chrX_female_PT_median_by_project_ov_male,
+                                               chrX_male_PT_median_by_project_ov_female)
+
+chrX_female_male_PT_median_by_project <- chrX_female_male_PT_median_by_project[,c(1,4,2,3)]
+chrX_female_male_PT_median_by_project$PT_diff <- chrX_female_male_PT_median_by_project$female_PT - chrX_female_male_PT_median_by_project$male_PT
+
+chrX_female_male_PT_diff_by_project <- chrX_female_male_PT_median_by_project %>% 
+  group_by(project) %>% 
+  mutate(row_id = row_number()) %>% 
+  pivot_wider(id_cols = "project",  names_from = row_id,
+              values_from = PT_diff, 
+              names_glue = "{.value}{row_id}") %>% 
+  ungroup() %>% as.data.frame()
+
+colnames(chrX_female_male_PT_diff_by_project) <- c("project_id", TCGA_meth_harmonized_450k_probes[chrX_probes_index])
+
+chrX_female_male_PT_diff_by_project <- t(chrX_female_male_PT_diff_by_project[,2:ncol(chrX_female_male_PT_diff_by_project)])
+colnames(chrX_female_male_PT_diff_by_project) <- unique(chrX_female_male_PT_median_by_project$project)
+chrX_female_male_PT_diff_by_project <- as.data.frame(chrX_female_male_PT_diff_by_project)
+chrX_female_male_PT_diff_by_project$probeID <- rownames(chrX_female_male_PT_diff_by_project)
+
+chrX_female_male_PT_diff_by_project <- inner_join(chrX_female_male_PT_diff_by_project,
+                                                  manifest_450k_odered_chrX,
+                                                  by = "probeID")
+
+chrX_female_male_PT_diff_by_project_gr <- makeGRangesFromDataFrame(chrX_female_male_PT_diff_by_project
+                                                                   [,c("chr", "start", "end", 
+                                                                       unique(chrX_female_male_PT_median_by_project$project))], 
+                                                                   keep.extra.columns = T)
+
+chrX_female_male_PT_diff_by_project_gr_dTrack <- DataTrack(chrX_female_male_PT_diff_by_project_gr)
+
+plotTracks(c(chrX_female_male_PT_diff_by_project_gr_dTrack, PAR_track,
+             cpgIslands_track), 
+           groups = unique(chrX_female_male_PT_median_by_project$project), 
+           type = c("h"), aggregateGroups = TRUE, ylim=c(-1,1), sizes = c(0.40, 0.10, 0.40),
+           from = 25000000, to = 25040000)
+
+```
+
+\normalsize
+
+* It does loom like there are tumor-type specific differences.
+* However this visualization doesn't seem appropriate to infer anything concretely.
+* How about carrying out dimensionality reduction (like PCA) and coloring the samples by tumor-type
+
+\tiny
+```{r chrX_meth_diff_across_tumors_2, warning=FALSE, cache=TRUE, message=FALSE, fig.height=10, fig.width=10, echo=FALSE}
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+
+################ annotation #####################
+
+manifest_450k_odered_chrX_gr <- makeGRangesFromDataFrame(manifest_450k_odered_chrX,
+                                                         keep.extra.columns = T)
+
+WG_solo_CG <- fread("/path/to/supporting_files/solo_WCGW_hg38.bed")
+colnames(WG_solo_CG) <- c("chr", "start", "end", "type", "class")
+WG_solo_CG_chrX <- WG_solo_CG[WG_solo_CG$chr == "chrX",]
+WG_solo_CG_chrX_gr <- makeGRangesFromDataFrame(WG_solo_CG_chrX, keep.extra.columns = T)
+
+manifest_450k_odered_chrX_ov_sWCGW <- findOverlapPairs(manifest_450k_odered_chrX_gr, 
+                                                       WG_solo_CG_chrX_gr)
+manifest_450k_sWGCW_probes <- manifest_450k_odered_chrX_ov_sWCGW@first$probeID
+
+library(annotatr)
+
+CpG_annot <- build_annotations(genome = 'hg38', annotations = c("hg38_cpgs"))
+manifest_450k_odered_chrX_CpG_annotated_gr <- annotate_regions(regions = manifest_450k_odered_chrX_gr,
+                                                               annotations = CpG_annot,
+                                                               ignore.strand = TRUE,
+                                                               quiet = FALSE)
+manifest_450k_odered_chrX_CpG_annotated_df <- data.frame(manifest_450k_odered_chrX_CpG_annotated_gr)[,c(1,2,3,7,18)]
+manifest_450k_odered_chrX_CpG_annotated_df[manifest_450k_odered_chrX_CpG_annotated_df$probeID %in% manifest_450k_sWGCW_probes,]$annot.type <- "solo-WCGW"
+manifest_450k_odered_chrX_CpG_annotated_df <- manifest_450k_odered_chrX_CpG_annotated_df[!duplicated(manifest_450k_odered_chrX_CpG_annotated_df$probeID),]
+rownames(manifest_450k_odered_chrX_CpG_annotated_df) <- manifest_450k_odered_chrX_CpG_annotated_df$probeID
+
+################################################################################
+########################## PT difference heatmap ###############################
+################################################################################
+
+na_omitted_chrX_female_male_PT_diff_by_project <- na.omit(chrX_female_male_PT_diff_by_project)
+rownames(na_omitted_chrX_female_male_PT_diff_by_project) <- na_omitted_chrX_female_male_PT_diff_by_project$probeID
+na_omitted_chrX_female_male_PT_diff_by_project <- na_omitted_chrX_female_male_PT_diff_by_project[,1:26]
+
+Heatmap(na_omitted_chrX_female_male_PT_diff_by_project %>% as.matrix(),
+        na_col = "Grey", show_row_names = FALSE, 
+        right_annotation = rowAnnotation(CpG_type = manifest_450k_odered_chrX_CpG_annotated_df[
+          rownames(na_omitted_chrX_female_male_PT_diff_by_project),
+          ]$annot.type, col = list(CpG_type = c("hg38_cpg_inter" = "#0B0014", 
+                                                "solo-WCGW" = "#73BA9B",
+                                                "hg38_cpg_shelves" = "#640BE3",
+                                                "hg38_cpg_shores" = "#D44D5C",
+                                                "hg38_cpg_islands" = "#F5E9E2"))))
+
+```
+
+\normalsize
+
+* The stratification with tumor-type is not very obvious.
+* Could it be linked to copy number?
+
+## Is chrX methylation difference between males and females correlated with copy number?
+
+\tiny
+```{r copy_number_data_download, echo=FALSE}
+
+################ allele-specific Copy Number Segment ######################
+
+copy_number_query <- GDCquery(project = TCGA_project_list, 
+                              data.category = "Copy Number Variation",
+                              data.type = "Allele-specific Copy Number Segment",
+                              access = "open",
+                              legacy = FALSE)
+GDCdownload(copy_number_query,
+            directory = "/path/to",
+            method = "api")
+copy_number_segment_data <- GDCprepare(copy_number_query,
+                                       directory = "/path/to")
+
+copy_number_segment_data <- as.data.frame(copy_number_segment_data)
+
+saveRDS(copy_number_query, "/path/to/copy_number_query.rds")
+saveRDS(copy_number_segment_data, "/path/to/copy_number_segment_data.rds")
+
+copy_number_segment_chrX <- copy_number_segment_data[copy_number_segment_data$Chromosome == "chrX",]
+copy_number_segment_chrX <- copy_number_segment_chrX[order(copy_number_segment_chrX$Sample,
+                                                           copy_number_segment_chrX$Chromosome,
+                                                           copy_number_segment_chrX$Start,
+                                                           copy_number_segment_chrX$End),]
+
+############### copy number segment ##############
+
+copy_number_segment_query <- GDCquery(
+  project = TCGA_project_list, 
+  data.category = "Copy Number Variation",
+  data.type = "Copy Number Segment",
+  access = "open",
+  legacy = FALSE
+)
+
+GDCdownload(copy_number_segment_query,
+            directory = "/path/to",
+            method = "api")
+
+
+############### gene level copy number ################
+
+gene_level_copy_number_query <- GDCquery(
+  project = TCGA_project_list, 
+  data.category = "Copy Number Variation",
+  data.type = "Gene Level Copy Number",
+  access = "open",
+  legacy = FALSE
+)
+
+GDCdownload(gene_level_copy_number_query,
+            directory = "/path/to",
+            method = "api")
+
+gene_level_copy_number_data <- GDCprepare(gene_level_copy_number_query,
+                                          directory = "/path/to")
+
+saveRDS(gene_level_copy_number_query, "/path/to/gene_level_copy_number_query.rds")
+saveRDS(gene_level_copy_number_data, "/path/to/gene_level_copy_number_data.rds")
+
+```
+
+```{r chrX_copy_number_data, echo=FALSE}
+
+gene_level_copy_number_query <- readRDS("/path/to/gene_level_copy_number_query.rds")
+gene_level_copy_number_data <- readRDS("/path/to/gene_level_copy_number_data.rds")
+
+chrX_gene_copies_meta_data <- colData(gene_level_copy_number_data)[colData(gene_level_copy_number_data)$project_id != "TCGA-TGCT",]
+
+chrX_gene_copies <- assays(gene_level_copy_number_data)$copy_number[chrX_genes_coord$gene_id,
+                                                                    rownames(chrX_gene_copies_meta_data)]
+chrX_min_gene_copies <- assays(gene_level_copy_number_data)$min_copy_number[chrX_genes_coord$gene_id,
+                                                                            rownames(chrX_gene_copies_meta_data)]
+chrX_max_gene_copies <- assays(gene_level_copy_number_data)$max_copy_number[chrX_genes_coord$gene_id,
+                                                                            rownames(chrX_gene_copies_meta_data)]
+
+saveRDS(chrX_gene_copies, "/path/to/chrX_gene_copies.rds")
+saveRDS(chrX_gene_copies_meta_data, "/path/to/chrX_gene_copies_meta_data.rds")
+
+saveRDS(chrX_min_gene_copies, "/path/to/chrX_min_gene_copies.rds")
+saveRDS(chrX_max_gene_copies, "/path/to/chrX_max_gene_copies.rds")
+
+```
+
+```{r chrX_gene_copies_hmap, warning=FALSE, cache=TRUE, message=FALSE, fig.height=3, fig.width=20, echo=FALSE}
+
+library(GenomicRanges)
+library(Gviz)
+
+chrX_gene_copies <- readRDS("/path/to/chrX_gene_copies.rds") %>% as.data.frame()
+chrX_min_gene_copies <- readRDS("/path/to/chrX_min_gene_copies.rds") %>% as.data.frame()
+chrX_max_gene_copies <- readRDS("/path/to/chrX_max_gene_copies.rds") %>% as.data.frame()
+chrX_gene_copies_meta_data <- readRDS("/path/to/chrX_gene_copies_meta_data.rds") %>% as.data.frame()
+
+genes_coord <- fread("/path/to/TCGA-ACC/harmonized/Copy_Number_Variation/Gene_Level_Copy_Number/03a54f86-e05e-48e3-a85a-02b54e4bbc1e/TCGA-ACC.eb2d3b3f-7cf2-44b8-a071-a9590f32e0fa.gene_level_copy_number.v36.tsv", select = c(1,2,3,4,5))
+chrX_genes_coord <- genes_coord[genes_coord$chromosome == "chrX",]
+colnames(chrX_genes_coord) <- c("gene_id", "gene_name", "chr", "start", "end")
+
+################### separate females ####################
+
+chrX_gene_copies_female_PT_md <- chrX_gene_copies_meta_data[chrX_gene_copies_meta_data$gender == "female" & 
+                                                              chrX_gene_copies_meta_data$sample_type == "Primary Tumor",]
+
+chrX_gene_copies_female <- chrX_gene_copies[,colnames(chrX_gene_copies) %in%
+                                              rownames(chrX_gene_copies_female_PT_md)]
+
+chrX_gene_copies_female <- cbind(chrX_genes_coord[,c(3,4,5)], chrX_gene_copies_female)
+chrX_gene_copies_female <- chrX_gene_copies_female[complete.cases(chrX_gene_copies_female),]
+
+chrX_gene_copies_female_gr <- makeGRangesFromDataFrame(chrX_gene_copies_female, 
+                                                       keep.extra.columns = T)
+
+chrX_gene_copies_female_dTrack <- DataTrack(chrX_gene_copies_female_gr)
+
+################### separate males ####################
+
+chrX_gene_copies_male_PT_md <- chrX_gene_copies_meta_data[chrX_gene_copies_meta_data$gender == "male" & 
+                                                            chrX_gene_copies_meta_data$sample_type == "Primary Tumor",]
+
+chrX_gene_copies_male <- chrX_gene_copies[,colnames(chrX_gene_copies) %in%
+                                            rownames(chrX_gene_copies_male_PT_md)]
+
+chrX_gene_copies_male <- cbind(chrX_genes_coord[,c(3,4,5)], chrX_gene_copies_male)
+chrX_gene_copies_male <- chrX_gene_copies_male[complete.cases(chrX_gene_copies_male),]
+
+chrX_gene_copies_male_gr <- makeGRangesFromDataFrame(chrX_gene_copies_male, 
+                                                       keep.extra.columns = T)
+
+chrX_gene_copies_male_dTrack <- DataTrack(chrX_gene_copies_male_gr)
+
+plotTracks(c(chrX_gene_copies_female_dTrack), 
+           type = c("boxplot", "a", "g"))
+
+plotTracks(c(chrX_gene_copies_male_dTrack), 
+           type =c("boxplot", "a", "g"))
+
+plotTracks(c(chrX_gene_copies_female_dTrack), 
+           type = c("a"), ylim = c(0,4))
+
+plotTracks(c(chrX_gene_copies_male_dTrack), 
+           type = c("a"), ylim = c(0,4))
+
+```
+
+```{r geom_hdi, echo=FALSE}
+
+library(hBayesDM)
+
+geom_hdi <- function(mapping = NULL, data = NULL, stat = "hdi",
+                     position = "identity", na.rm = TRUE, show.legend = NA,
+                     inherit.aes = TRUE,
+                     credible_mass=0.95, ...) {
+  layer(
+    `geom` = GeomHdi,
+    mapping = mapping,
+    data = data,
+    stat = stat,
+    position = position,
+    show.legend = show.legend,
+    inherit.aes = inherit.aes,
+    params = list(credible_mass=credible_mass,
+                  ...)
+  )
+}
+
+GeomHdi <- ggproto("GeomHdi", GeomSegment,
+                   required_aes = c("x"),
+                   default_aes = aes(colour = "black", size = 3, linetype = 1, alpha = NA)
+)
+
+stat_hdi <- function(mapping = NULL, data = NULL, `geom` = "segment",
+                     position = "identity", na.rm = TRUE, show.legend = NA, inherit.aes = TRUE,
+                     credible_mass=0.95, ...) {
+  layer(
+    stat = StatHdi,
+    data = data,
+    mapping = mapping,
+    `geom` = `geom`,
+    position = position,
+    show.legend = show.legend,
+    inherit.aes = inherit.aes,
+    params = list(credible_mass=credible_mass,
+                  ...
+    )
+  )
+}
+
+StatHdi <- ggproto("StatHdi", Stat,
+                   
+                   required_aes = c("x"),
+                   
+                   compute_group = function(self, data, scales, params,
+                                            credible_mass=0.95) {
+                     require(hBayesDM)
+                     hdi.data<-HDIofMCMC(data$x,credible_mass)
+                     data.frame(x=hdi.data[1],xend=hdi.data[2],y=0,yend=0)
+                   }
+)
+
+```
+
+
+```{r bootstrap_plt, warning=FALSE, cache=TRUE, message=FALSE, fig.height=4, fig.width=10, echo=FALSE}
+
+chrX_probes <- TCGA_meth_harmonized_450k_probes[chrX_probes_index]
+
+WG_solo_CG <- fread("/path/to/supporting_files/solo_WCGW_hg38.bed")
+colnames(WG_solo_CG) <- c("chr", "start", "end", "type", "class")
+WG_solo_CG_chrX <- WG_solo_CG[WG_solo_CG$chr == "chrX",]
+WG_solo_CG_chrX_gr <- makeGRangesFromDataFrame(WG_solo_CG_chrX, keep.extra.columns = T)
+
+median_meth_diff_chrX <- female_male_median_diff[female_male_median_diff$chr == "chrX",
+                                                 c("chr", "start", "end", "probeID",
+                                                   "PT_diff", "NT_diff")]
+
+median_meth_diff_chrX_gr <- makeGRangesFromDataFrame(median_meth_diff_chrX,
+                                                     keep.extra.columns = T)
+
+############# normal tissues ##############
+
+median_meth_diff_NT_chrX_gr <- median_meth_diff_chrX_gr[,c(1,3)]
+median_meth_diff_NT_chrX_gr <- median_meth_diff_NT_chrX_gr[! is.na(median_meth_diff_NT_chrX_gr$NT_diff)]
+median_meth_pos_diff_NT_chrX_gr <- median_meth_diff_NT_chrX_gr[median_meth_diff_NT_chrX_gr$NT_diff > 0.1]
+median_meth_neg_diff_NT_chrX_gr <- median_meth_diff_NT_chrX_gr[median_meth_diff_NT_chrX_gr$NT_diff < -0.1]
+
+pos_diff_NT_ov_sWCGW_gr <- findOverlapPairs(median_meth_pos_diff_NT_chrX_gr,
+                                            WG_solo_CG_chrX_gr)
+neg_diff_NT_ov_sWCGW_gr <- findOverlapPairs(median_meth_neg_diff_NT_chrX_gr,
+                                            WG_solo_CG_chrX_gr)
+
+############# primary tunmor ##############
+
+median_meth_diff_PT_chrX_gr <- median_meth_diff_chrX_gr[,c(1,2)]
+median_meth_diff_PT_chrX_gr <- median_meth_diff_PT_chrX_gr[! is.na(median_meth_diff_PT_chrX_gr$PT_diff)]
+median_meth_pos_diff_PT_chrX_gr <- median_meth_diff_PT_chrX_gr[median_meth_diff_PT_chrX_gr$PT_diff > 0.1]
+median_meth_neg_diff_PT_chrX_gr <- median_meth_diff_PT_chrX_gr[median_meth_diff_PT_chrX_gr$PT_diff < -0.1]
+
+pos_diff_PT_ov_sWCGW_gr <- findOverlapPairs(median_meth_pos_diff_PT_chrX_gr,
+                                            WG_solo_CG_chrX_gr)
+neg_diff_PT_ov_sWCGW_gr <- findOverlapPairs(median_meth_neg_diff_PT_chrX_gr,
+                                            WG_solo_CG_chrX_gr)
+
+########### all CpG's #############
+
+library(BSgenome.Hsapiens.UCSC.hg38)
+chrs <- names(Hsapiens)[!grepl("upstream", names(Hsapiens))] #filter out the "upstream" chromosomes
+CGs <- lapply(chrs[23], function(x) start(matchPattern("CG", Hsapiens[[x]])))
+
+all_chrX_CpGs <- data.frame(chr = rep("chrX", length(CGs[[1]])),
+                            start = CGs[[1]] - 1,
+                            end = CGs[[1]] + 1)
+all_chrX_CpGs_gr <- makeGRangesFromDataFrame(all_chrX_CpGs)
+
+######### bootstrapping NT #########
+
+manifest_450k_odered_chrX_gr <- makeGRangesFromDataFrame(manifest_450k_odered_chrX,
+                                                         keep.extra.columns = T)
+total_CpGs <- length(all_chrX_CpGs_gr)
+total_chrX_450k <- length(manifest_450k_odered_chrX_gr)
+
+total_chrX_NT_gr <- length(median_meth_diff_NT_chrX_gr)
+total_neg_NT_CpGs <- length(median_meth_neg_diff_NT_chrX_gr)
+total_pos_NT_CpGs <- length(median_meth_pos_diff_NT_chrX_gr)
+
+neg_bootstrap <- c()
+pos_bootstrap <- c()
+
+for (i in 1:5000){
+
+  sampled_CpG_probes_rows <- sample.int(total_CpGs, total_chrX_450k)
+  sampled_CpG_probes <- all_chrX_CpGs_gr[sampled_CpG_probes_rows,]
+  sampled_CpG_probes_indices <- c(1:length(sampled_CpG_probes))
+  
+  sampled_CpG_neg_NT_rows <- sample(sampled_CpG_probes_indices,
+                                    total_neg_NT_CpGs, replace = FALSE)
+  sampled_CpG_pos_NT_rows <- sample(sampled_CpG_probes_indices[!sampled_CpG_probes_indices 
+                                                               %in% sampled_CpG_neg_NT_rows],
+                                    total_pos_NT_CpGs, replace = FALSE)
+
+  sampled_CpG_neg_NTs <- sampled_CpG_probes[sampled_CpG_neg_NT_rows,]
+  sampled_CpG_pos_NTs <- sampled_CpG_probes[sampled_CpG_pos_NT_rows,]
+
+  neg_bootstrap[i] <- length(findOverlapPairs(sampled_CpG_neg_NTs, WG_solo_CG_chrX_gr))/total_neg_NT_CpGs
+  pos_bootstrap[i] <- length(findOverlapPairs(sampled_CpG_pos_NTs, WG_solo_CG_chrX_gr))/total_pos_NT_CpGs
+  
+}
+
+######### bootstrapping PT #########
+
+total_chrX_PT_gr <- length(median_meth_diff_PT_chrX_gr)
+total_neg_PT_CpGs <- length(median_meth_neg_diff_PT_chrX_gr)
+total_pos_PT_CpGs <- length(median_meth_pos_diff_PT_chrX_gr)
+
+neg_bootstrap_PT <- c()
+pos_bootstrap_PT <- c()
+
+for (i in 1:5000){
+
+  sampled_CpG_probes_rows <- sample.int(total_CpGs, total_chrX_450k)
+  sampled_CpG_probes <- all_chrX_CpGs_gr[sampled_CpG_probes_rows,]
+  sampled_CpG_probes_indices <- c(1:length(sampled_CpG_probes))
+  
+  sampled_CpG_neg_PT_rows <- sample(sampled_CpG_probes_indices,
+                                    total_neg_PT_CpGs, replace = FALSE)
+  sampled_CpG_pos_PT_rows <- sample(sampled_CpG_probes_indices[!sampled_CpG_probes_indices 
+                                                               %in% sampled_CpG_neg_PT_rows],
+                                    total_pos_PT_CpGs, replace = FALSE)
+
+  sampled_CpG_neg_PTs <- sampled_CpG_probes[sampled_CpG_neg_PT_rows,]
+  sampled_CpG_pos_PTs <- sampled_CpG_probes[sampled_CpG_pos_PT_rows,]
+
+  neg_bootstrap_PT[i] <- length(findOverlapPairs(sampled_CpG_neg_PTs, WG_solo_CG_chrX_gr))/total_neg_PT_CpGs
+  pos_bootstrap_PT[i] <- length(findOverlapPairs(sampled_CpG_pos_PTs, WG_solo_CG_chrX_gr))/total_pos_PT_CpGs
+  
+}
+
+hist(neg_bootstrap)
+hist(pos_bootstrap)
+hist(neg_bootstrap_PT)
+hist(pos_bootstrap_PT)
+
+bootstrap_df <- data.frame(percent_CpG = c(neg_bootstrap, pos_bootstrap,
+                                           neg_bootstrap_PT, pos_bootstrap_PT),
+                           meth_diff = c(rep("neg", length(neg_bootstrap)),
+                                         rep("pos", length(pos_bootstrap)),
+                                         rep("neg", length(neg_bootstrap_PT)),
+                                         rep("pos", length(pos_bootstrap_PT))),
+                           condition = c(rep("NT", length(neg_bootstrap) + length(pos_bootstrap)),
+                                         rep("PT", length(neg_bootstrap_PT) + length(pos_bootstrap_PT))))
+
+bootstrap_df$meth_diff <- factor(bootstrap_df$meth_diff,
+                                levels = c("neg", "pos"))
+bootstrap_df$condition <- factor(bootstrap_df$condition,
+                                levels = c("NT", "PT"))
+
+actual_perc_df <- data.frame(percent = c(length(neg_diff_NT_ov_sWCGW_gr)/length(median_meth_neg_diff_NT_chrX_gr),
+                                         length(pos_diff_NT_ov_sWCGW_gr)/length(median_meth_pos_diff_NT_chrX_gr),
+                                         length(neg_diff_PT_ov_sWCGW_gr)/length(median_meth_neg_diff_PT_chrX_gr),
+                                         length(pos_diff_PT_ov_sWCGW_gr)/length(median_meth_pos_diff_PT_chrX_gr)),
+                             meth_diff = c("neg", "pos", "neg", "pos"),
+                             condition = c("NT", "NT", "PT", "PT"))
+
+actual_perc_df$meth_diff <- factor(actual_perc_df$meth_diff,
+                                   levels = c("neg", "pos"))
+actual_perc_df$condition <- factor(actual_perc_df$condition,
+                                   levels = c("NT", "PT"))
+
+bootstrap_plt <- ggplot(bootstrap_df, 
+                        aes(x = percent_CpG, color = meth_diff)) +
+                        geom_histogram(binwidth= 0.0001, fill="white", 
+                                       alpha=0.5, position="identity") +
+                        geom_vline(data = actual_perc_df,
+                                   aes(xintercept = percent, color = meth_diff)) +
+                        geom_hdi(aes(color=meth_diff),lineend="round",
+                                 credible_mass=0.99,alpha=0.8) +
+                        facet_wrap(~ condition) +
+                        ggtitle("") +
+                        theme(plot.title = element_text(hjust = 0.5, color="black", size=14, face="bold"),
+                              strip.background = element_blank(),
+                              strip.text.x = element_text(size = 14),
+                              panel.border = element_rect(color = "black", fill = NA, size = 1), 
+                              panel.grid.major = element_blank(), 
+                              panel.grid.minor = element_blank(), 
+                              panel.background = element_blank(), 
+                              axis.text.x = element_text(size = 14, hjust = 1),
+                              axis.text.y= element_text(size = 14, hjust = 1)) +
+                       scale_x_continuous(name="Percentage of probes overlapping with solo-WCGW")
+ bootstrap_plt
+
+```
+
+
+:::{#bootstrap_plt layout-ncol=2}
+
+![]("/path/to/analysis_in_quarto/analysis_in_quarto_files/figure-pdf/bootstrap_plt.pdf"){width=500}
+
+:::
+
+\normalsize
+
+## Is there a replication related mechanism?
+
+* Analysis of time series data GSE179847 (cited in Jamie's paper)
+
+\tiny
+
+```{r GSE179847_analysis, warning=FALSE, message=FALSE, fig.height=9, fig.width=8, echo=FALSE}
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(rtracklayer)
+
+GSE179847_DNAm <- fread("/path/to/GSE179847/GSE179847_Cell_lifespan_DNAm_processed_matrix.csv", 
+                        nThread = 20) %>% as.data.frame()
+GSE179847_series_metadata <- fread("/path/to/GSE179847/Lifespan_Study_Data.csv") %>% as.data.frame()
+
+################ select only Normal somatic controls #############
+
+all_cntrls_with_basename <- GSE179847_series_metadata[(GSE179847_series_metadata$basename != "") &
+                                                        (GSE179847_series_metadata$Treatment == "Control_21") &
+                                                        (GSE179847_series_metadata$Cell_Type !=  "Immortalized Embryonic Kidney") &
+                                                        (GSE179847_series_metadata$Clinical_Condition ==  "Normal"),]
+
+all_cntrls_basenames <- paste0(all_cntrls_with_basename$basename, " beta")
+
+all_cntrls_beta <- GSE179847_DNAm[,all_cntrls_basenames]
+rownames(all_cntrls_beta) <- GSE179847_DNAm$V1
+
+################ EPIC manifest #################
+
+EPIC_hg38_manifest <- fread("/path/to/GSE179847/EPIC.hg38.manifest.tsv")
+EPIC_hg38_manifest <- EPIC_hg38_manifest[,c(1,2,3,9)]
+colnames(EPIC_hg38_manifest) <- c("chr", "start", "end", "Probe_ID")
+EPIC_hg38_manifest <- EPIC_hg38_manifest[order(EPIC_hg38_manifest$chr,
+                                               EPIC_hg38_manifest$start,
+                                               EPIC_hg38_manifest$end),]
+EPIC_hg38_manifest_chrX <- EPIC_hg38_manifest[EPIC_hg38_manifest$chr == "chrX",]
+
+EPIC_hg38_manifest_chrX_gr <- makeGRangesFromDataFrame(EPIC_hg38_manifest_chrX, 
+                                                       keep.extra.columns = T)
+
+
+############## annotation ###############
+
+WG_solo_CG <- fread("/path/to/supporting_files/solo_WCGW_hg38.bed")
+colnames(WG_solo_CG) <- c("chr", "start", "end", "type", "class")
+WG_solo_CG_chrX <- WG_solo_CG[WG_solo_CG$chr == "chrX",]
+WG_solo_CG_chrX_gr <- makeGRangesFromDataFrame(WG_solo_CG_chrX, keep.extra.columns = T)
+
+EPIC_hg38_manifest_chrX_ov_sWCGW <- findOverlapPairs(EPIC_hg38_manifest_chrX_gr, 
+                                                     WG_solo_CG_chrX_gr)
+sWGCW_probes <- EPIC_hg38_manifest_chrX_ov_sWCGW@first$Probe_ID
+
+library(annotatr)
+
+CpG_annot <- build_annotations(genome = 'hg38', annotations = c("hg38_cpgs"))
+EPIC_hg38_manifest_chrX_CpG_annotated_gr <- annotate_regions(regions = EPIC_hg38_manifest_chrX_gr,
+                                                             annotations = CpG_annot,
+                                                             ignore.strand = TRUE,
+                                                             quiet = FALSE)
+EPIC_hg38_manifest_chrX_CpG_annotated_df <- data.frame(EPIC_hg38_manifest_chrX_CpG_annotated_gr)[,c(1,2,3,6,16)]
+EPIC_hg38_manifest_chrX_CpG_annotated_df[EPIC_hg38_manifest_chrX_CpG_annotated_df$Probe_ID %in% sWGCW_probes,]$annot.type <- "solo-WCGW"
+EPIC_hg38_manifest_chrX_CpG_annotated_df <- EPIC_hg38_manifest_chrX_CpG_annotated_df[!duplicated(EPIC_hg38_manifest_chrX_CpG_annotated_df$Probe_ID),]
+rownames(EPIC_hg38_manifest_chrX_CpG_annotated_df) <- EPIC_hg38_manifest_chrX_CpG_annotated_df$Probe_ID
+
+############### A/B compartments ################
+
+compartments <- import("/path/to/supporting_files/GSE174533_1-C11-CB1.PC1.bw")
+compartments_chrX <- compartments[seqnames(compartments) == "chrX"]
+A_compartments_chrX <- compartments_chrX[compartments_chrX$score >= 0]
+B_compartments_chrX <- compartments_chrX[compartments_chrX$score < 0]
+
+EPIC_hg38_manifest_chrX_CpG_annotated_df$compartment <- rep("A", nrow(EPIC_hg38_manifest_chrX_CpG_annotated_df))
+EPIC_hg38_manifest_chrX_CpG_annotated_df[
+  findOverlapPairs(EPIC_hg38_manifest_chrX_gr, 
+                   B_compartments_chrX)@first$Probe_ID,
+  ]$compartment <- "B"
+
+############### H3K27me3 ################
+
+k27me3 <- import("/path/to/supporting_files/ENCFF712VFA.bigBed")
+k27me3_chrX <- k27me3[seqnames(k27me3) == "chrX"]
+
+EPIC_hg38_manifest_chrX_CpG_annotated_df$K27me3 <- rep("No", nrow(EPIC_hg38_manifest_chrX_CpG_annotated_df))
+EPIC_hg38_manifest_chrX_CpG_annotated_df[
+  findOverlapPairs(EPIC_hg38_manifest_chrX_gr, 
+                   k27me3_chrX)@first$Probe_ID,
+  ]$K27me3 <- "Yes"
+
+############### H3K9me3 ################
+
+k9me3 <- import("/path/to/supporting_files/ENCFF746OFG.bigBed")
+k9me3_chrX <- k27me3[seqnames(k9me3) == "chrX"]
+
+EPIC_hg38_manifest_chrX_CpG_annotated_df$K9me3 <- rep("No", nrow(EPIC_hg38_manifest_chrX_CpG_annotated_df))
+EPIC_hg38_manifest_chrX_CpG_annotated_df[
+  findOverlapPairs(EPIC_hg38_manifest_chrX_gr, 
+                   k9me3_chrX)@first$Probe_ID,
+  ]$K9me3 <- "Yes"
+
+################## select chrX probes beta values ########################
+
+all_cntrls_beta_chrX <- all_cntrls_beta[EPIC_hg38_manifest_chrX$Probe_ID,] 
+
+```
+
+```{r GSE179847_analysis_2, warning=FALSE, cache=TRUE, message=FALSE, fig.height=10, fig.width=10, echo=FALSE}
+
+####################  female - male beta values #####################
+
+male_metadata <- all_cntrls_with_basename[(all_cntrls_with_basename$Sex == "male"),
+                                              c("Unique_variable_name_new", "Sex", "Passage", 
+                                                "Study_Part", "Cell_Type", "Clinical_Condition", 
+                                                "Treatment", "basename")]
+female_metadata <- all_cntrls_with_basename[(all_cntrls_with_basename$Sex == "female"),
+                                                c("Unique_variable_name_new", "Sex", "Passage", 
+                                                "Study_Part", "Cell_Type", "Clinical_Condition", 
+                                                "Treatment", "basename")]
+
+male_female_metadata <- inner_join(male_metadata, female_metadata,
+                                   by = c("Cell_Type", "Study_Part", "Passage"))
+
+male_beta_chrX <- all_cntrls_beta_chrX[,paste0(male_female_metadata$basename.x, " beta")]
+female_beta_chrX <- all_cntrls_beta_chrX[,paste0(male_female_metadata$basename.y, " beta")]
+
+female_male_beta_diff_chrX <- female_beta_chrX - male_beta_chrX
+female_male_beta_diff_chrX <- female_male_beta_diff_chrX[complete.cases(female_male_beta_diff_chrX), ]
+
+Heatmap(as.matrix(female_male_beta_diff_chrX), 
+        top_annotation = HeatmapAnnotation(Study_Part = as.character(male_female_metadata$Study_Part),
+                                           Passage = male_female_metadata$Passage),
+                                    column_split = as.character(male_female_metadata$Study_Part),
+        right_annotation = rowAnnotation(CpG_type = EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_beta_diff_chrX),
+          ]$annot.type, 
+          compartment =  EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_beta_diff_chrX),
+          ]$compartment,
+          K27me3 = EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_beta_diff_chrX),
+          ]$K27me3,
+          K9me3 = EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_beta_diff_chrX),
+          ]$K9me3,
+          col = list(CpG_type = c("hg38_cpg_inter" = "#0B0014", 
+                                  "solo-WCGW" = "#89fc00",
+                                  "hg38_cpg_shelves" = "#72ddf7",
+                                  "hg38_cpg_shores" = "#D44D5C",
+                                  "hg38_cpg_islands" = "#F5E9E2"),
+                     compartment = c("A" = "#f17300",
+                                     "B" = "#0d47a1"),
+                     K27me3 = c("Yes" = "#fffaff",
+                                "No" = "#1e1b18"),
+                     K9me3 = c("Yes" = "#fffaff",
+                               "No" = "#1e1b18"))),
+        show_row_names = FALSE, show_column_names = FALSE,
+        cluster_rows = TRUE, cluster_columns = FALSE,
+        na_col = "Grey")
+
+```
+
+* Do these blue probes lack methylation in females or are these methylated in females but just a little more methylated in males than females?
+
+```{r GSE179847_analysis_3, warning=FALSE, cache=TRUE, message=FALSE, fig.height=10, fig.width=10, echo=FALSE}
+
+female_male_and_beta_diff_chrX <- cbind(female_male_beta_diff_chrX[,1:12], 
+                                        female_beta_chrX[rownames(female_male_beta_diff_chrX),1:12],
+                                        male_beta_chrX[rownames(female_male_beta_diff_chrX),1:12])
+
+EPIC_hg38_manifest_gr <- makeGRangesFromDataFrame(EPIC_hg38_manifest[!is.na(EPIC_hg38_manifest$chr) & 
+                                                                       !is.na(EPIC_hg38_manifest$start) & 
+                                                                       !is.na(EPIC_hg38_manifest$end)], 
+                                                  keep.extra.columns = T)
+
+grch38_gtf_EZHIP_promoter_gr <- promoters(grch38_gtf_EZHIP_gr, upstream=7000, downstream=7000, use.names=TRUE)
+
+EZHIP_overlapping_probes <- findOverlapPairs(EPIC_hg38_manifest_gr, grch38_gtf_EZHIP_promoter_gr, ignore.strand = T)
+EZHIP_overlapping_probes <- EPIC_hg38_manifest_gr[EPIC_hg38_manifest_gr$Probe_ID %in% EZHIP_overlapping_probes@first$Probe_ID]
+EZHIP_overlapping_probes$dist_from_TSS <- (start(EZHIP_overlapping_probes) + 1) - start(grch38_gtf_EZHIP_gr)
+
+EPIC_hg38_manifest_chrX_CpG_annotated_df$EZHIP_prmtr <- rep("No", nrow(EPIC_hg38_manifest_chrX_CpG_annotated_df))
+EPIC_hg38_manifest_chrX_CpG_annotated_df[EPIC_hg38_manifest_chrX_CpG_annotated_df$Probe_ID %in% EZHIP_overlapping_probes$Probe_ID,]$EZHIP_prmtr <- "Yes"
+
+chrX_pseudoautosomal.hg38 <- data.frame(chr = c("chrX", "chrX"), start = c(10001, 155701383), end = c(2781479, 156030895))
+chrX_pseudoautosomal.hg38_gr <- makeGRangesFromDataFrame(chrX_pseudoautosomal.hg38)
+
+PAR_ov_probes <- findOverlapPairs(EPIC_hg38_manifest_gr, chrX_pseudoautosomal.hg38_gr, ignore.strand = T)
+
+female_male_and_beta_diff_chrX_hmap <-
+Heatmap(as.matrix(female_male_and_beta_diff_chrX), 
+        top_annotation = HeatmapAnnotation(Category = as.character(c(rep("Sub (female - male)", 12),
+                                                                     rep("female", 12), rep("male", 12))),
+                                           Passage = rep(male_female_metadata[1:12,]$Passage, 3)),
+        column_split =as.character(c(rep("Sub (female - male)", 12),
+                                     rep("female", 12), rep("male", 12))),
+        right_annotation = rowAnnotation(CpG_type = EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_and_beta_diff_chrX),
+          ]$annot.type, 
+          compartment =  EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_and_beta_diff_chrX),
+          ]$compartment,
+          K27me3 = EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_and_beta_diff_chrX),
+          ]$K27me3,
+          K9me3 = EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_and_beta_diff_chrX),
+          ]$K9me3,
+          EZHIP_prmtr =  EPIC_hg38_manifest_chrX_CpG_annotated_df[
+          rownames(female_male_and_beta_diff_chrX),
+          ]$EZHIP_prmtr,
+          col = list(CpG_type = c("hg38_cpg_inter" = "#0B0014", 
+                                  "solo-WCGW" = "#89fc00",
+                                  "hg38_cpg_shelves" = "#72ddf7",
+                                  "hg38_cpg_shores" = "#D44D5C",
+                                  "hg38_cpg_islands" = "#F5E9E2"),
+                     compartment = c("A" = "#f17300",
+                                     "B" = "#0d47a1"),
+                     K27me3 = c("Yes" = "#fffaff",
+                                "No" = "#1e1b18"),
+                     K9me3 = c("Yes" = "#fffaff",
+                               "No" = "#1e1b18"),
+                     EZHIP_prmtr = c("Yes" = "black",
+                                     "No" = "pink"))),
+        show_row_names = FALSE, show_column_names = FALSE,
+        cluster_rows = TRUE, cluster_columns = FALSE,
+        na_col = "Grey")
+
+female_male_and_beta_diff_chrX_hmap
+
+female_male_and_beta_diff_EZHIP <- female_male_and_beta_diff_chrX[EPIC_hg38_manifest_chrX_CpG_annotated_df[EPIC_hg38_manifest_chrX_CpG_annotated_df$EZHIP_prmtr == "Yes",]$Probe_ID,]
+female_male_and_beta_diff_EZHIP_ann_df <- EPIC_hg38_manifest_chrX_CpG_annotated_df[EPIC_hg38_manifest_chrX_CpG_annotated_df$EZHIP_prmtr == "Yes",]
+female_male_and_beta_diff_EZHIP_ann_df$dist_from_TSS <- EZHIP_overlapping_probes$dist_from_TSS
+rownames(female_male_and_beta_diff_EZHIP) <- EZHIP_overlapping_probes$dist_from_TSS
+rownames(female_male_and_beta_diff_EZHIP_ann_df) <- EZHIP_overlapping_probes$dist_from_TSS
+
+  Heatmap(as.matrix(female_male_and_beta_diff_EZHIP), 
+        top_annotation = HeatmapAnnotation(Category = as.character(c(rep("Sub (female - male)", 12),
+                                                                     rep("female", 12), rep("male", 12))),
+                                           Passage = rep(male_female_metadata[1:12,]$Passage, 3)),
+        column_split =as.character(c(rep("Sub (female - male)", 12),
+                                     rep("female", 12), rep("male", 12))),
+        right_annotation = rowAnnotation(CpG_type = female_male_and_beta_diff_EZHIP_ann_df[
+          rownames(female_male_and_beta_diff_EZHIP),
+          ]$annot.type, 
+          compartment =  female_male_and_beta_diff_EZHIP_ann_df[
+          rownames(female_male_and_beta_diff_EZHIP),
+          ]$compartment,
+          K27me3 = female_male_and_beta_diff_EZHIP_ann_df[
+          rownames(female_male_and_beta_diff_EZHIP),
+          ]$K27me3,
+          K9me3 = female_male_and_beta_diff_EZHIP_ann_df[
+          rownames(female_male_and_beta_diff_EZHIP),
+          ]$K9me3,
+          col = list(CpG_type = c("hg38_cpg_inter" = "#0B0014", 
+                                  "solo-WCGW" = "#89fc00",
+                                  "hg38_cpg_shelves" = "#72ddf7",
+                                  "hg38_cpg_shores" = "#D44D5C",
+                                  "hg38_cpg_islands" = "#F5E9E2"),
+                     compartment = c("A" = "#f17300",
+                                     "B" = "#0d47a1"),
+                     K27me3 = c("Yes" = "#fffaff",
+                                "No" = "#1e1b18"),
+                     K9me3 = c("Yes" = "#fffaff",
+                               "No" = "#1e1b18"),
+                     EZHIP_prmtr = c("Yes" = "black",
+                                     "No" = "pink"))),
+        show_row_names = TRUE, show_column_names = FALSE,
+        cluster_rows = FALSE, cluster_columns = FALSE,
+        na_col = "Grey")
+
+```
+\normalsize
+
+1) CpG islands methylated in females and unmethylated in males (as expected).  
+2) Top cluster loses methylation with passages in males not (or not much) in females. That's why the switch from blue to red in difference panel (last one). 
+3) Intergenic CpG's are methylated in both males and females but appear to be more in males if we look at the color intensity or difference panel. 
+4) Cluster (second from the bottom) that loses methylation in both males and females over passages seems to be enriched in solo-WCGW's (can do a proper statistical analysis). 
+5) Then there's cluster which is almost unmethylated in both females and males (third from the bottom). It also seems to be enriched in CGI's and H3K27me3. Could these be escape genes or PAR's? 
+
+```{r warning=FALSE, cache=TRUE, message=FALSE, fig.height=8, fig.width=8, echo=FALSE}
+
+library(data.table)
+
+hg38_gtf <- fread('~/ayush_hpc_projects//references/gtf_files/Homo_sapiens.GRCh38.102.chr_patch_hapl_scaff.gtf', skip = 5) %>% as.data.frame()
+hg38_chrX_genes <- hg38_gtf[(hg38_gtf$V1 == "X") & (hg38_gtf$V3 == "gene"),]
+hg38_chrX_genes$gene_name <- gsub(".*gene_name \"", "", hg38_chrX_genes$V9) %>% gsub("\".*", "", .)
+
+gene_abundance <- fread('/path/to/GSE179847/GSE179848_txi_gene_abundance.csv') %>% as.data.frame()
+rownames(gene_abundance) <- gene_abundance$V1
+
+gene_metadata <- fread('/path/to/GSE179847/SraRunTable.txt') %>% as.data.frame()
+
+cntrls_gene_metadata <- gene_metadata[(gene_metadata$rnaseq_sampleid != "") &
+                                        (gene_metadata$treatments == "Control") &
+                                        (gene_metadata$clinical_condition ==  "Normal"),]
+
+cntrls_gene_metadata_sp2 <- cntrls_gene_metadata[cntrls_gene_metadata$study_part == 2 & !is.na(cntrls_gene_metadata$Passage),]
+
+male_cntrls_gene_metadata <- cntrls_gene_metadata_sp2[(cntrls_gene_metadata_sp2$sex == "male"),
+                                                      c("rnaseq_sampleid", "sex", "Passage", 
+                                                        "study_part", "Cell_type", "clinical_condition", 
+                                                        "treatments")]
+male_cntrls_gene_metadata <- male_cntrls_gene_metadata[order(male_cntrls_gene_metadata$Passage),]
+
+female_cntrls_gene_metadata <- cntrls_gene_metadata_sp2[(cntrls_gene_metadata_sp2$sex == "female"),
+                                                      c("rnaseq_sampleid", "sex", "Passage", 
+                                                        "study_part", "Cell_type", "clinical_condition", 
+                                                        "treatments")]
+female_cntrls_gene_metadata <- female_cntrls_gene_metadata[order(female_cntrls_gene_metadata$Passage),]
+
+chrX_gene_abundance <- as.matrix(gene_abundance[hg38_chrX_genes$gene_name,
+                                 c(paste0(male_cntrls_gene_metadata$rnaseq_sampleid, "_lenscaleTPM"),
+                                   paste0(female_cntrls_gene_metadata$rnaseq_sampleid, "_lenscaleTPM"))])
+
+chrX_gene_abundance <- chrX_gene_abundance[complete.cases(chrX_gene_abundance),]
+
+Heatmap(log2(chrX_gene_abundance + 1), 
+        top_annotation = HeatmapAnnotation(Category = as.character(c(rep("male", nrow(male_cntrls_gene_metadata)),
+                                                                     rep("female", nrow(female_cntrls_gene_metadata)))),
+                                           Passage = c(male_cntrls_gene_metadata$Passage,
+                                                       female_cntrls_gene_metadata$Passage)),
+        column_split =as.character(c(rep("male", nrow(male_cntrls_gene_metadata)),
+                                     rep("female", nrow(female_cntrls_gene_metadata)))),
+        show_row_names = FALSE, show_column_names = FALSE,
+        cluster_rows = TRUE, cluster_columns = FALSE,
+        na_col = "Grey")
+
+```
+
+```{r warning=FALSE, cache=TRUE, message=FALSE, fig.height=12, fig.width=12, echo=FALSE}
+
+TCGA_meth_harmonized_450k_mat_chrX <- TCGA_meth_harmonized_450k_mat[chrX_probes_index,
+                                                                    which(TCGA_meth_harmonized_450k_colData$project_id 
+                                                                          != "TCGA-LGG")]
+rownames(TCGA_meth_harmonized_450k_mat_chrX) <- manifest_450k_odered_chrX$probeID
+
+TCGA_meth_harmonized_450k_mat_chrX <- TCGA_meth_harmonized_450k_mat_chrX[complete.cases(TCGA_meth_harmonized_450k_mat_chrX),]
+
+row_order = hclust(dist(TCGA_meth_harmonized_450k_mat_chrX))$order
+
+################### Tumor #####################
+
+female_PT_chrX_hmap <- Heatmap(TCGA_meth_harmonized_450k_mat_chrX[row_order,
+                                                                  sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Primary Tumor") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$sample] %>% as.matrix(),
+                               top_annotation = HeatmapAnnotation(project = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Primary Tumor") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$project,
+                                                                  sex = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Primary Tumor") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$type,
+                                                                  log_fpkm = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Primary Tumor") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$log_fpkm,
+                                                                  col = list(sex = c("female Primary Tumor" = "#E64B35FF"))),
+                               column_split = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == 
+                                                                              "female Primary Tumor") & 
+                                                                             (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$type,
+                               cluster_rows = FALSE, cluster_columns = TRUE, show_row_names = FALSE,
+                               show_column_names = FALSE, na_col = "Grey", show_heatmap_legend = FALSE)
+
+female_NT_chrX_hmap <- Heatmap(TCGA_meth_harmonized_450k_mat_chrX[row_order,
+                                                                  sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Solid Tissue Normal") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$sample] %>% as.matrix(),
+                               top_annotation = HeatmapAnnotation(project = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Solid Tissue Normal") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$project,
+                                                                  sex = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Solid Tissue Normal") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$type,
+                                                                  log_fpkm = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Solid Tissue Normal") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$log_fpkm,
+                                                                  col = list(sex = c("female Solid Tissue Normal" = "red"))),
+                               column_split = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "female Solid Tissue Normal") & 
+                                                                             (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$type,
+                               cluster_rows = FALSE, cluster_columns = TRUE, show_row_names = FALSE,
+                               show_column_names = FALSE, na_col = "Grey", show_heatmap_legend = FALSE)
+
+male_NT_chrX_hmap <- Heatmap(TCGA_meth_harmonized_450k_mat_chrX[row_order,
+                                                                sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Solid Tissue Normal") & 
+                                                                                               (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$sample] %>% as.matrix(),
+                               top_annotation = HeatmapAnnotation(project = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Solid Tissue Normal") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$project,
+                                                                  sex = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Solid Tissue Normal") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$type,
+                                                                  log_fpkm = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Solid Tissue Normal") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$log_fpkm,
+                                                                  col = list(sex = c("male Solid Tissue Normal" = "blue"))),
+                               column_split = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Solid Tissue Normal") & 
+                                                                             (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$type,
+                               cluster_rows = FALSE, cluster_columns = TRUE, show_row_names = FALSE,
+                               show_column_names = FALSE, na_col = "Grey", show_heatmap_legend = FALSE)
+
+male_PT_chrX_hmap <- Heatmap(TCGA_meth_harmonized_450k_mat_chrX[row_order,
+                                                                  sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Primary Tumor") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$sample] %>% as.matrix(),
+                               top_annotation = HeatmapAnnotation(project = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Primary Tumor") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$project,
+                                                                  sex = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Primary Tumor") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$type,
+                                                                  log_fpkm = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Primary Tumor") & 
+                                                                                                 (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$log_fpkm,
+                                                                  col = list(sex = c("male Primary Tumor" = "#4DBBD5FF"))),
+                               right_annotation = rowAnnotation(CpG_type = manifest_450k_odered_chrX_CpG_annotated_df[
+                                 rownames(TCGA_meth_harmonized_450k_mat_chrX)[row_order],
+                                 ]$annot.type, col = list(CpG_type = c("hg38_cpg_inter" = "#0B0014", 
+                                                                       "solo-WCGW" = "#89fc00",
+                                                                       "hg38_cpg_shelves" = "#72ddf7",
+                                                                       "hg38_cpg_shores" = "#D44D5C",
+                                                                       "hg38_cpg_islands" = "#F5E9E2"))),
+                               column_split = sex_sorted_primary_normal_df[(sex_sorted_primary_normal_df$type == "male Primary Tumor") & 
+                                                                             (sex_sorted_primary_normal_df$project != "TCGA-LGG"),]$type,
+                               cluster_rows = FALSE, cluster_columns = TRUE, show_row_names = FALSE,
+                               show_column_names = FALSE, na_col = "Grey")
+
+female_NT_chrX_hmap + female_PT_chrX_hmap + male_NT_chrX_hmap + male_PT_chrX_hmap
+
+```
+
+
