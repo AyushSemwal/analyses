@@ -1,0 +1,3953 @@
+---
+title: "scRNA_seq_analysis"
+author: "Ayush"
+format:
+  pdf: default
+  elsevier-pdf:
+    keep-tex: true
+---
+
+### Create whitelist for kb-pipeline
+
+* We create a whitelist of all possible barcodes as per the ParseBio barcodes design in the csv file.
+* This whitelist is used to correct the barcodes in the actual data.
+
+\tiny
+```{r create_whitelist, warning=FALSE, cache=TRUE}
+
+library(data.table)
+library(dplyr)
+# library(ggpubr)
+
+barcodes <- fread("/path/to/kallisto_analysis/barcode_data.csv") %>% as.data.frame()
+
+round3_bc <- barcodes[barcodes$bc_round == 3, "sequence"]
+round2_bc <- barcodes[barcodes$bc_round == 2, "sequence"]
+round1_T_bc <- barcodes[(barcodes$bc_round == 1) & (barcodes$type == "T"), "sequence"]
+round1_R_bc <- barcodes[(barcodes$bc_round == 1) & (barcodes$type == "R"), "sequence"]
+round1_T_wells <- barcodes[(barcodes$bc_round == 1) & (barcodes$type == "T"), "well"]
+round1_R_wells <- barcodes[(barcodes$bc_round == 1) & (barcodes$type == "R"), "well"]
+
+round_3_2_1T_barcodes <- c()
+round_3_2_1R_barcodes <- c()
+
+T_wells <- c()
+R_wells <- c()
+
+total_barcodes = 0
+
+for (i in 1:length(round3_bc)){
+  for (j in 1:length(round2_bc)){
+    for (k in 1:length(round1_T_bc)){
+      total_barcodes = total_barcodes + 1
+       round_3_2_1T_barcodes[total_barcodes] <- paste0(round3_bc[i],
+                                                       round2_bc[j],
+                                                       round1_T_bc[k])
+       T_wells[total_barcodes] <- round1_T_wells[k]
+       
+       round_3_2_1R_barcodes[total_barcodes] <- paste0(round3_bc[i],
+                                                       round2_bc[j],
+                                                       round1_R_bc[k])
+       R_wells[total_barcodes] <- round1_R_wells[k]
+    }
+  }
+}
+
+all_barcodes_df <- data.frame(barcode = c(round_3_2_1T_barcodes, 
+                                          round_3_2_1R_barcodes), 
+                              act_barcode_index = c(1:length(round_3_2_1T_barcodes), 
+                                                    1:length(round_3_2_1R_barcodes)), 
+                              well = c(T_wells, R_wells), 
+                              row.names = c(round_3_2_1T_barcodes, 
+                                            round_3_2_1R_barcodes))
+
+# write.table(c(round_3_2_1T_barcodes, round_3_2_1R_barcodes),
+#           "/path/to/kallisto_analysis/all_possible_barcodes.txt",
+#           sep = "\n", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+```
+\normalsize
+
+## Count
+
+* Kb-python pipeline is used for read counts at the gene-level.
+
+\tiny
+```{r kb_count, warning=FALSE, cache=TRUE}
+
+##################### gene-level #########################
+
+# fastq_files <- list.files("/path/to/fastqs_6434-KB")
+# 
+# fastq_dir <- "/path/to/fastqs_6434-KB/"
+# 
+# cd <- "cd /path/to \n"
+# mkdir <- paste0("mkdir -p kallisto_analysis/kb_python_gene_counts_new/counts \n")
+# 
+# fastq_input <- paste(paste0("fastqs_6434-KB/" ,fastq_files), collapse = " ")
+# 
+# kb_count <- paste0("( time /home/ayush.semwal2/tools/miniconda3/bin/kb count -w kallisto_analysis/all_possible_barcodes.txt -t 30 -m 500G -i kallisto_ref/ens109_reporters_ercc92.idx -g kallisto_ref/ens109_reporters_ercc92_t2g.txt --kallisto /home/ayush.semwal2/tools/miniconda3/bin/kallisto --bustools /home/ayush.semwal2/tools/miniconda3/bin/bustools -x SPLiT-seq -o kallisto_analysis/kb_python_gene_counts_new/counts ", fastq_input, " ) > kallisto_analysis/kb_python_gene_counts_new/counts/kb_count.log 2>&1 \n" )
+# 
+# system(paste0(cd, mkdir, kb_count))
+
+```
+\normalsize
+
+## Collapse barcodes
+
+\tiny
+```{r collapse_barcodes, warning=FALSE, cache=TRUE}
+
+library(Matrix)
+library(irlba)
+library(ggplot2)
+library(dplyr)
+library(scico)
+library(scuttle)
+library(scater)
+library(data.table)
+library(tidyverse)
+library(ggpubr)
+
+################# function to collapse barcodes ####################
+
+collapse_barcodes <- function(all_barcodes_df, barcodes, gene_counts, out_dir, count_level){
+
+  barcodes$obs_barcode_index <- as.numeric(rownames(barcodes))
+  barcodes$act_barcode_index <- rep(NA, nrow(barcodes))
+  rownames(barcodes) <- barcodes$V1
+
+  barcodes$act_barcode_index <- all_barcodes_df[barcodes$V1,]$act_barcode_index
+
+  gene_counts$V1 <- barcodes[gene_counts$V1, "act_barcode_index"]
+
+  gene_counts_collapsed <- gene_counts %>% group_by(V1, V2) %>%
+    summarize(value = sum(V3)) %>% ungroup %>% as.data.frame()
+
+  gene_counts_collapsed <- gene_counts_collapsed[order(gene_counts_collapsed$V1,
+                                                       gene_counts_collapsed$V2),]
+
+  fwrite(c(1:max(gene_counts_collapsed$V1)),
+         paste0(out_dir, "gene_counts_collapsed.barcodes.txt"), sep = "\n")
+
+  if (count_level == "gene"){
+    header <- list("%%MatrixMarket matrix coordinate real general", "%",
+                 paste0(max(gene_counts_collapsed$V1),
+                        " ", max(gene_counts_collapsed$V2), " ",
+                        nrow(gene_counts_collapsed)))
+
+    fwrite(header, paste0(out_dir, "gene_counts_collapsed.mtx"), sep = "\n")
+
+    fwrite(gene_counts_collapsed, paste0(out_dir, "gene_counts_collapsed.mtx"),
+           col.names = FALSE, sep = " ", append = TRUE)
+  }
+
+  else if (count_level == "transcript"){
+    header <- list("%%MatrixMarket matrix coordinate real general",
+                 paste0(max(gene_counts_collapsed$V1),
+                        " ", max(gene_counts_collapsed$V2), " ",
+                        nrow(gene_counts_collapsed)))
+
+    fwrite(header, paste0(out_dir, "transcript_counts_collapsed.mtx"), sep = "\n")
+
+    fwrite(gene_counts_collapsed, paste0(out_dir, "transcript_counts_collapsed.mtx"),
+           col.names = FALSE, sep = " ", append = TRUE)
+  }
+
+  else if (count_level == "tpm"){
+    header <- list("%%MatrixMarket matrix coordinate real general",
+                 paste0(max(gene_counts_collapsed$V1),
+                        " ", max(gene_counts_collapsed$V2), " ",
+                        nrow(gene_counts_collapsed)))
+
+    fwrite(header, paste0(out_dir, "transcript_tpm_collapsed.mtx"), sep = "\n")
+
+    fwrite(gene_counts_collapsed, paste0(out_dir, "transcript_tpm_collapsed.mtx"),
+           col.names = FALSE, sep = " ", append = TRUE)
+  }
+}
+
+###################### collapse barcodes ########################
+
+count_level <- "gene"
+
+barcodes <- fread("/path/to/kallisto_analysis/kb_python_gene_counts_new/counts/counts_unfiltered/cells_x_genes.barcodes.txt", header = FALSE) %>% as.data.frame()
+
+gene_counts <- fread("/path/to/kallisto_analysis/kb_python_gene_counts_new/counts/counts_unfiltered/cells_x_genes.mtx", skip = 3,
+                  colClasses=list(integer=c("V1","V2","V3"))) %>% as.data.frame()
+
+out_dir <- "/path/to/kallisto_analysis/kb_python_gene_counts_new/counts/counts_unfiltered/"
+
+collapse_barcodes(all_barcodes_df, barcodes, gene_counts, out_dir, count_level)
+
+```
+\normalsize
+
+## Separate samples
+
+* The raw data comprises of fastq's from all the conditions together. So, had to separate them.
+
+\tiny
+```{r separate_samples, warning=FALSE, cache=TRUE}
+
+# ####################### function to separate samples ########################
+# 
+separate_samples <- function(combined_mat, gene_annotation, all_barcodes_df, corr_wells){
+
+  subset_mat <- combined_mat[,as.numeric(colnames(combined_mat)) %in%
+                               all_barcodes_df[
+                                 all_barcodes_df$well %in%
+                                   corr_wells,
+                                 ]$act_barcode_index]
+  subset_sce <- SingleCellExperiment(assays = list(counts = subset_mat))
+
+  # rownames(subset_sce) <- ens2gene[rownames(subset_sce),]$V3
+
+  altExp(subset_sce, "ERCC") <- subset_sce[grep("^ERCC-", rownames(subset_sce)), ]
+  subset_sce <- subset_sce[grep("^ERCC-", rownames(subset_sce), invert = T), ]
+
+  MT_names <- gene_annotation[grep("^MT-", gene_annotation$V3),]$ENSMBL_id
+  is_mito <- rownames(subset_sce) %in% MT_names
+
+  subset_sce <- addPerCellQC(subset_sce, subsets = list(Mito = is_mito))
+  subset_sce <- addPerFeatureQC(subset_sce)
+
+  return(subset_sce)
+}
+
+# ################## separate samples ########################
+
+library(BUSpaRse)
+
+gene_counts_collapsed_mat <- read_count_output("/path/to/kallisto_analysis/kb_python_gene_counts_new/counts/counts_unfiltered", name = "gene_counts_collapsed")
+rownames(gene_counts_collapsed_mat) <- gsub("\\..*", "", rownames(gene_counts_collapsed_mat))
+
+gene_annotation <- fread("/path/to/kallisto_ref/ens109_reporters_ercc92_t2g.txt", header = FALSE) %>% as.data.frame()
+rownames(gene_counts_collapsed_mat) <- gsub("\\..*", "", rownames(gene_counts_collapsed_mat))
+
+ovcar_msc_m2_sce <- separate_samples(gene_counts_collapsed_mat, gene_annotation, all_barcodes_df,
+                              paste0("A", c(1:5)))
+msc_sce <- separate_samples(gene_counts_collapsed_mat, gene_annotation, all_barcodes_df,
+                            paste0("A", c(6:12)))
+m2_sce <- separate_samples(gene_counts_collapsed_mat, gene_annotation, all_barcodes_df,
+                          paste0("B", c(1:7)))
+ovcar_msc_sce <- separate_samples(gene_counts_collapsed_mat, gene_annotation, all_barcodes_df,
+                                  c(paste0("B", c(8:12)), "C1", "C2"))
+ovcar_m2_sce <- separate_samples(gene_counts_collapsed_mat, gene_annotation, all_barcodes_df,
+                                 paste0("C", c(3:9)))
+msc_m2_sce <- separate_samples(gene_counts_collapsed_mat, gene_annotation, all_barcodes_df,
+                               c(paste0("C", c(10:12)), paste0("D", c(1:4))))
+ovcar_sce <- separate_samples(gene_counts_collapsed_mat, gene_annotation, all_barcodes_df,
+                                     paste0("D", c(5:12)))
+
+# ##################### save sce objects ###################
+
+sample_names <- c("ovcar_msc_m2", "msc", "m2", "ovcar_msc",
+                  "ovcar_m2", "msc_m2", "ovcar")
+all_sce <- list(ovcar_msc_m2_sce, msc_sce, m2_sce, ovcar_msc_sce,
+                ovcar_m2_sce, msc_m2_sce, ovcar_sce)
+
+for (i in 1:length(sample_names)){
+  system(paste0("mkdir -p /path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/",
+                sample_names[i]))
+  saveRDS(all_sce[[i]],
+          paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/",
+                 sample_names[i], "/", sample_names[i], "_collapsed_sce.rds"))
+}
+
+```
+\normalsize
+
+* each condition's sce object is saved as .rds file in their respective directories with the nomenclature {condition}/{condition}_collapsed_sce.rds
+
+## Initial filtering
+
+* filtering out empty droplets and high Mitochondrial content cells
+
+\tiny
+```{r gene_level_filtering_function, warning=FALSE, cache=TRUE}
+
+gene_level_qc_filter <- function(collapsed_sce, out_dir){
+
+  library(DropletUtils)
+
+  ############## knee plot ##############
+
+  bcrank <- barcodeRanks(counts(collapsed_sce))
+  uniq <- !duplicated(bcrank$rank)
+
+  bcrank_uniq <- bcrank[uniq,] %>% as.data.frame()
+
+  knee_plot <- ggplot(bcrank_uniq, aes(x = rank, y = total)) +
+                      geom_point(alpha = 0.5) +
+                      geom_hline(aes(yintercept = metadata(bcrank)$inflection,
+                                     linetype = "Inflection"),
+                                 color = "green") +
+                      geom_hline(aes(yintercept = metadata(bcrank)$knee,
+                                     linetype = "Knee"),
+                                 color = "blue") +
+                      scale_linetype_manual(name = "", values = c(2, 2),
+                                            guide = guide_legend(override.aes = list(color = c("green", "blue")))) +
+                      ggtitle("Total UMI count vs rank") +
+                      theme(plot.title = element_text(hjust = 0.5, color="black",
+                                                      size=14, face="bold"),
+                      strip.background = element_blank(),
+                      strip.text.x = element_blank(),
+                      panel.border = element_rect(color = "black", fill = NA, size = 1),
+                      panel.grid.minor = element_blank(),
+                      panel.background = element_blank(),
+                      axis.text.x = element_text(size = 14, hjust = 1),
+                      axis.text.y= element_text(size = 14, hjust = 1)) +
+                      scale_x_continuous(trans='log10') +
+                      scale_y_continuous(trans='log10')
+
+  pdf(file=paste0(out_dir, "/knee_plot.pdf"), width = 10, height = 8)
+  print(knee_plot)
+  dev.off()
+
+  ############### filter-out empty droplets ###############
+
+  library(BiocParallel)
+
+  set.seed(0101010)
+  e.out <- emptyDrops(counts(collapsed_sce), niters = 20000,
+                      BPPARAM=MulticoreParam(20))
+
+  collapsed_sce$empty_drops <- e.out$Limited == "FALSE"
+
+  collapsed_sce_filtered <- collapsed_sce[, !is.na(collapsed_sce$empty_drops)]
+  collapsed_sce_filtered <- collapsed_sce_filtered[,!(colData(collapsed_sce_filtered)$empty_drops)]
+
+    ################ before removing empty droplets ###############
+
+  Mt_pc_vs_sum_knee_filt <- plotColData(collapsed_sce, x="sum", y="subsets_Mito_percent", colour_by="empty_drops")
+  detected_vs_sum_knee_filt <- plotColData(collapsed_sce, x="sum", y="detected", colour_by="empty_drops")
+  ERCC_vs_Mt_pc_knee_filt <- plotColData(collapsed_sce, x="altexps_ERCC_percent", y="subsets_Mito_percent", colour_by="empty_drops")
+
+  pdf(file=paste0(out_dir, "/empty_droplet_filtering.pdf"), width = 8, height = 6)
+  print(Mt_pc_vs_sum_knee_filt)
+  print(detected_vs_sum_knee_filt)
+  print(ERCC_vs_Mt_pc_knee_filt)
+  dev.off()
+
+  ############# quick scuttle filtering #################
+
+  reasons <- perCellQCFilters(collapsed_sce_filtered,
+                              sub.fields=c("subsets_Mito_percent",
+                                           "altexps_ERCC_percent"))
+  colSums(as.matrix(reasons))
+
+  collapsed_sce_filtered$discard <- reasons$discard
+
+    ############## After removing empty droplets ################
+
+  Mt_pc_vs_sum_final <- plotColData(collapsed_sce_filtered, x="sum", y="subsets_Mito_percent", colour_by="discard")
+  detected_vs_sum_final <- plotColData(collapsed_sce_filtered, x="sum", y="detected", colour_by="discard")
+  ERCC_vs_Mt_pc_final <- plotColData(collapsed_sce_filtered, x="altexps_ERCC_percent", y="subsets_Mito_percent", colour_by="discard")
+
+  pdf(file=paste0(out_dir, "/final_filtering.pdf"), width = 8, height = 6)
+  print(Mt_pc_vs_sum_final)
+  print(detected_vs_sum_final)
+  print(ERCC_vs_Mt_pc_final)
+  dev.off()
+
+  ################### final filtered sce ######################
+
+  collapsed_sce_filtered <- collapsed_sce_filtered[,!colData(collapsed_sce_filtered)$discard]
+  saveRDS(collapsed_sce_filtered, paste0(out_dir, "/collapsed_sce_filtered.rds"))
+}
+
+```
+\normalsize
+
+\tiny
+```{r gene_level_filtering, warning=FALSE, cache=TRUE}
+
+for (i in c(1:length(sample_names))){
+
+  out_dir <- paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/",
+                 sample_names[i])
+  collapsed_sce <- all_sce[[i]]
+  gene_level_qc_filter(collapsed_sce, out_dir)
+
+}
+
+```
+\normalsize
+
+* after filtering, each condition's sce object is saved as .rds file in their respective directories with the nomenclature {condition}/collapsed_sce_filtered.rds
+* the directories also store the QC plots generated for each condition.
+
+## Function for dimentionality reduction plot from a data frame
+
+* Writing an automated function for dimensionality reduction plots that will be used in the downstream steps
+
+\tiny
+```{r gene_dim_red, warning=FALSE, cache=TRUE, fig.width=12, fig.height=12}
+
+############## function to generate dimentionality reduction plots #################
+
+dimRed_plot <- function(dim1, dim2, colorBy, sizeBy, title, x_lab, y_lab, leg_lab, scale_type){
+  
+  dimRed_subset <- data.frame(dim1 = dim1, dim2 = dim2,
+                              colorBy = colorBy, sizeBy = sizeBy)
+  
+  if (scale_type == "disc"){
+    dim_plot <- ggplot(dimRed_subset, aes(x = dim1, y = dim2, colour = colorBy)) +
+                    geom_point(alpha = 0.3, size = sizeBy) + 
+                    ggtitle(title) +
+                    xlab(x_lab) + ylab(y_lab) +
+                    scale_colour_discrete(name = leg_lab) +
+                    theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                                    size=14, face="bold"),
+                          
+                          strip.background = element_blank(),
+                          strip.text.x = element_blank(),
+                          panel.border = element_rect(color = "black", 
+                                                      fill = NA, size = 1), 
+                          panel.grid.major = element_blank(), 
+                          panel.grid.minor = element_blank(), 
+                          panel.background = element_blank(), 
+                          axis.text.x = element_text(size = 14, hjust = 1),
+                          axis.text.y= element_text(size = 14, hjust = 1),
+                          legend.position="top") + guides(color = guide_legend(override.aes = list(size = 3)))
+  }
+  else{
+    dim_plot <- ggplot(dimRed_subset, aes(x = dim1, y = dim2, colour = colorBy)) +
+                    geom_point(alpha = 0.5, size = sizeBy) + 
+                    ggtitle(title) +
+                    xlab(x_lab) + ylab(y_lab) +
+                    scale_colour_continuous(name = leg_lab) +
+                    theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                                    size=14, face="bold"),
+                          
+                          strip.background = element_blank(),
+                          strip.text.x = element_blank(),
+                          panel.border = element_rect(color = "black", 
+                                                      fill = NA, size = 1), 
+                          panel.grid.major = element_blank(), 
+                          panel.grid.minor = element_blank(), 
+                          panel.background = element_blank(), 
+                          axis.text.x = element_text(size = 14, hjust = 1),
+                          axis.text.y= element_text(size = 14, hjust = 1),
+                          legend.position="top")
+  }
+  return(dim_plot)
+}
+
+```
+\normalsize
+
+## Function to cluster and annotate cells
+
+* Writing an automated function for clustering and annotating cells that will be used in the downstream steps
+
+\tiny
+```{r clustr_n_annot_func, warning=FALSE, cache=TRUE}
+
+################# function to cluster and annotate ######################
+
+cluster_n_annot <- function(scObj_na_blank, out_dir){
+  
+  library(bluster)
+  set.seed(0101010)
+  scObj_na_blank.cl <- clusterCells(scObj_na_blank, use.dimred = "PCA",
+                                    BLUSPARAM=TwoStepParam(first=KmeansParam(centers=1000),
+                                                           second=NNGraphParam(k=5)))
+  table(scObj_na_blank.cl)
+  colLabels(scObj_na_blank) <- scObj_na_blank.cl
+  
+  fwrite(data.frame(table(scObj_na_blank.cl)), paste0(out_dir, "/cluster_cell_numbers.txt"), sep = "\t")
+  
+  library(scran)
+  library(celldex)
+  
+  ref <- celldex::BlueprintEncodeData(ensembl = TRUE)
+  
+  library(SingleR)
+  pred <- SingleR(test=scObj_na_blank, ref=ref, labels=ref$label.main, 
+                assay.type.test = "logcounts")
+  
+  fwrite(data.frame(table(pred$labels)), paste0(out_dir, "/pred_labels.txt"), sep = "\t")
+  
+  tab <- table(Assigned=pred$pruned.labels, 
+               Cluster=colLabels(scObj_na_blank))
+  
+  fwrite(data.frame(unclass(tab)), paste0(out_dir, "/cluster_annot.txt"), sep = "\t")
+  
+  # Adding a pseudo-count of 10 to avoid strong color jumps with just 1 cell.
+  library(pheatmap)
+  cluster_annot_hmap <- pheatmap(log2(tab+10), color=colorRampPalette(c("white", "blue"))(101))
+  
+  pdf(file=paste0(out_dir, "/cluster_annot_hmap.pdf"))
+  print(cluster_annot_hmap)
+  dev.off()
+  
+  return(scObj_na_blank)
+}
+
+```
+\normalsize
+
+## Function to create a combined PCA, UMAP and tSNE data frame and generate plots (including density plots)
+
+* Writing an automated function for dimensionality reduction plots (using the function above) and the density plots (using Nebulosa) that will be used in the downstream steps.
+
+\tiny
+```{r dimred_plots_func, warning=FALSE, cache=TRUE}
+
+################# non-linear dimentionality reduction plots ##################
+
+non_linear_dim_red <- function(scObj_na_blank, min_dist, n_neighbors, out_dir){
+  
+  percent.var <- attr(reducedDim(scObj_na_blank, "PCA"), "percentVar")
+  
+  pdf(paste0(out_dir, "/perc_var.pdf"))
+  plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)")
+  dev.off()
+  
+  library(PCAtools)
+  set.seed(0101010)
+  scObj_na_blank <- runTSNE(scObj_na_blank, dimred = "PCA", 
+                            pca = findElbowPoint(percent.var), scale = TRUE)
+  set.seed(0101010)
+  scObj_na_blank <- runUMAP(scObj_na_blank, dimred = "PCA", 
+                            pca = findElbowPoint(percent.var), scale = TRUE,
+                            min_dist = min_dist, n_neighbors=n_neighbors)
+  
+  saveRDS(scObj_na_blank, paste0(out_dir, "/collapsed_sce_final.rds"))
+  
+  dim_reds_df <- data.frame(PC1 = reducedDim(scObj_na_blank, "PCA")[,1],
+                            PC2 = reducedDim(scObj_na_blank, "PCA")[,2],
+                            UMAP1 = reducedDim(scObj_na_blank, "UMAP")[,1],
+                            UMAP2 = reducedDim(scObj_na_blank, "UMAP")[,2],
+                            TSNE1 = reducedDim(scObj_na_blank, "TSNE")[,1],
+                            TSNE2 = reducedDim(scObj_na_blank, "TSNE")[,2],
+                            cluster_label = colData(scObj_na_blank)$label,
+                            GFP = unname(log2(counts(scObj_na_blank)["GFP",] +
+                                                counts(scObj_na_blank)["EGFP",] + 1)),
+                            mCherry = unname(log2(counts(scObj_na_blank)["mCherry",] + 1)),
+                            smURF = unname(log(counts(scObj_na_blank)["smURFP",] + 1)),
+                            libsize = log2(colData(scObj_na_blank)$sum + 1))
+  
+  dim_reds_df$cluster_label <- factor(dim_reds_df$cluster_label,
+                                    levels = levels(dim_reds_df$cluster_label))
+  
+  PC_plot <- dimRed_plot(dim_reds_df$PC1, dim_reds_df$PC2, 
+                         dim_reds_df$cluster_label, 0.8, 
+                         "PCA plot", "PC1", "PC2", "Cluster", "disc")
+  UMAP_plot <- dimRed_plot(dim_reds_df$UMAP1, dim_reds_df$UMAP2, 
+                           dim_reds_df$cluster_label, 0.8, 
+                           "UMAP plot", "UMAP1", "UMAP2", "Cluster", "disc")
+  
+  g <- ggplot_build(UMAP_plot)
+  cluster_colors <- unique(g$data[[1]][order(g$data[[1]]$group),]$colour)
+  names(cluster_colors) <- c(1:length(unique(scObj_na_blank$label)))
+  
+  UMAP_GFP_plot <- dimRed_plot(dim_reds_df$UMAP1, dim_reds_df$UMAP2, 
+                               dim_reds_df$GFP, dim_reds_df$GFP, 
+                               "UMAP plot (Sized by GFP expresion)", 
+                               "UMAP1", "UMAP2", "GFP", "cont")
+  UMAP_mCherry_plot <- dimRed_plot(dim_reds_df$UMAP1, dim_reds_df$UMAP2, 
+                                   dim_reds_df$mCherry, dim_reds_df$mCherry, 
+                                   "UMAP plot (Sized by mCherry expresion)", 
+                                   "UMAP1", "UMAP2", "mCherry", "cont")
+  UMAP_smURF_plot <- dimRed_plot(dim_reds_df$UMAP1, dim_reds_df$UMAP2,
+                                 dim_reds_df$smURF, dim_reds_df$smURF, 
+                                 "UMAP plot (Sized by smURF expresion)", 
+                                 "UMAP1", "UMAP2", "smURF", "cont")
+  UMAP_libsize_plot <- dimRed_plot(dim_reds_df$UMAP1, dim_reds_df$UMAP2, 
+                                   dim_reds_df$libsize, 0.8, 
+                                   "UMAP plot (colored by lib size)", 
+                                   "UMAP1", "UMAP2", "lib size", "cont")
+  
+  library(Nebulosa)
+  CD73_density_plot <- plot_density(scObj_na_blank, 
+                                    gene_annotation[gene_annotation$V3 == "NT5E", 
+                                                    "ENSMBL_id"][1], 
+                                    method = "wkde") + labs(title = "CD73")
+  CD90_density_plot <- plot_density(scObj_na_blank, 
+                                    gene_annotation[gene_annotation$V3 == "THY1", 
+                                                    "ENSMBL_id"][1],
+                                    method = "wkde") + labs(title = "CD90")
+  CD105_density_plot <- plot_density(scObj_na_blank, 
+                                     gene_annotation[gene_annotation$V3 == "ENG", 
+                                                     "ENSMBL_id"][1],
+                                     method = "wkde") + labs(title = "CD105")
+  
+  CD4_density_plot <- plot_density(scObj_na_blank, 
+                                   gene_annotation[gene_annotation$V3 == "CD4", 
+                                                   "ENSMBL_id"][1],
+                                   method = "wkde") + labs(title = "CD4")
+  CD11D_density_plot <- plot_density(scObj_na_blank, 
+                                     gene_annotation[gene_annotation$V3 == "ITGAD", 
+                                                     "ENSMBL_id"][1],
+                                     method = "wkde") + labs(title = "CD11D")
+  CD14_density_plot <- plot_density(scObj_na_blank, 
+                                    gene_annotation[gene_annotation$V3 == "CD14", 
+                                                    "ENSMBL_id"][1],
+                                    method = "wkde") + labs(title = "CD14")
+  CD45_density_plot <- plot_density(scObj_na_blank, 
+                                    gene_annotation[gene_annotation$V3 == "PTPRC", 
+                                                    "ENSMBL_id"][1],
+                                    method = "wkde") + labs(title = "CD45")
+  
+  EPCAM_density_plot <- plot_density(scObj_na_blank, 
+                                     gene_annotation[gene_annotation$V3 == "EPCAM", 
+                                                     "ENSMBL_id"][1],
+                                     method = "wkde") + labs(title = "EPCAM")
+  
+  dim_red_plots <- ggarrange(PC_plot, UMAP_plot, UMAP_GFP_plot, 
+                             UMAP_mCherry_plot, UMAP_smURF_plot, UMAP_libsize_plot,
+                             ncol = 3, nrow = 2)
+  MSC_plots <- ggarrange(UMAP_plot, CD73_density_plot, 
+                         CD90_density_plot, CD105_density_plot,
+                         ncol = 3, nrow = 2)
+  M2_plots <- ggarrange(UMAP_plot, CD4_density_plot, 
+                            CD11D_density_plot, CD14_density_plot, 
+                            CD45_density_plot, ncol = 3, nrow = 2)
+  OVCAR_plots <- ggarrange(UMAP_plot, EPCAM_density_plot,
+                           ncol = 3, nrow = 2)
+
+  return(list(scObj_na_blank, dim_red_plots, MSC_plots, 
+              M2_plots, OVCAR_plots, cluster_colors))
+}
+
+```
+\normalsize
+
+## function for pipelining normalization, feature selection and dimensionality reduction (linear & non-linear)
+
+\tiny
+```{r separate_plots_func, cache=TRUE}
+
+scRNAseq_analysis <- function(scObj, cluster_annotat, non_lin_dimRed, out_dir){
+  
+  scObj_na_blank <- scObj[! rownames(scObj) == "",]
+  
+  ######### Normalization #########
+  
+  library(scuttle)
+  library(scran)
+  library(scater)
+  library(BiocParallel)
+  
+  set.seed(100)
+  clust.scObj_na_blank <- quickCluster(scObj_na_blank) 
+  
+  scObj_na_blank <- computeSumFactors(scObj_na_blank, 
+                                      cluster = clust.scObj_na_blank,
+                                      min.mean = 0.1)
+  scObj_na_blank <- logNormCounts(scObj_na_blank)
+  
+  ######### feature selection ########
+  
+  dec.scObj_na_blank <- modelGeneVarByPoisson(scObj_na_blank, 
+                                              assay.type = "logcounts")
+  
+  fit.scObj_na_blank <- metadata(dec.scObj_na_blank)
+  
+  pdf(paste0(out_dir, "/geneVarByPoisson.pdf"))
+  plot(fit.scObj_na_blank$mean, 
+       fit.scObj_na_blank$var, 
+       xlab="Mean of log-expression",
+       ylab="Variance of log-expression")
+  curve(fit.scObj_na_blank$trend(x), 
+        col="dodgerblue", 
+        add=TRUE, lwd=2)
+  dev.off()
+  
+  top.scObj_na_blank <- getTopHVGs(dec.scObj_na_blank, n = 500)
+  fwrite(list(top.scObj_na_blank), paste0(out_dir, "/top500_HVG.txt"), sep = "\n")
+  
+  ############ Dimensionality reduction #################
+  
+  scObj_na_blank <- runPCA(scObj_na_blank, exprs_values = "logcounts", 
+                           subset_row = top.scObj_na_blank, scale = TRUE)
+  
+  ############ cluster and annotate ###############
+  
+  if (cluster_annotat == "TRUE"){
+    scObj_na_blank <- cluster_n_annot(scObj_na_blank, min_dist, n_neighbors)
+  }
+  
+  ############ non-linear dimensionality reduction ##########
+  
+  if (non_lin_dimRed == "TRUE"){
+    
+    dim_red <- non_linear_dim_red(scObj_na_blank, out_dir)
+    
+    pdf(file=paste0(out_dir, "/dim_red.pdf"), width = 18, height = 12)
+    print(dim_red[[2]])
+    dev.off()
+  }
+}
+
+```
+
+
+## Processing conditions separately
+
+* Process each of the mono- and co-culture conditions separately using the pipeline function above
+
+```{r dim_red, fig.width=20, fig.height=10, cache=TRUE}
+
+gene_annotation <- fread("/path/to/kallisto_ref/ens109_reporters_ercc92_t2g.txt", header = FALSE) %>% as.data.frame()
+gene_annotation$ENSMBL_id <- gsub("\\..*", "", gene_annotation$V2)
+ens2gene <- unique(gene_annotation[,c(3,9)])
+rownames(ens2gene) <- ens2gene$ENSMBL_id
+
+sample_names <- c("ovcar_msc_m2", "msc", "m2", "ovcar_msc",
+                  "ovcar_m2", "msc_m2", "ovcar")
+
+for (i in 1:length(sample_names)){
+
+  filtered_sce <- readRDS(paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/",
+                 sample_names[i], "/collapsed_sce_filtered.rds"))
+  system(paste0("mkdir -p /path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/",
+                sample_names[i], "/downstream_analysis"))
+  out_dir <- paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/",
+                sample_names[i], "/downstream_analysis")
+
+  scRNAseq_analysis(filtered_sce, "TRUE", "TRUE", out_dir)
+}
+
+```
+
+* the .rds files generated for each condition are stored in their respective directories with the nomenclature {condition}/downstream_analysis/collapsed_sce_final.rds
+* the folders also contain the QC plots generated
+
+## Analysis all the samples together
+
+* Doublet detection per condition basis and then combine into a single SCE object retaining the meta information 
+
+### Doublet detection per sample basis
+
+```{r AS_doublet_detect, fig.width=20, fig.height=10, cache=TRUE}
+
+gene_annotation <- fread("/path/to/kallisto_ref/ens109_reporters_ercc92_t2g.txt", header = FALSE) %>% as.data.frame()
+gene_annotation$ENSMBL_id <- gsub("\\..*", "", gene_annotation$V2)
+ens2gene <- unique(gene_annotation[,c(3,9)])
+rownames(ens2gene) <- ens2gene$ENSMBL_id
+
+ovcar_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/ovcar/downstream_analysis/collapsed_sce_final.rds")
+ovcar_msc_m2_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/ovcar_msc_m2/downstream_analysis/collapsed_sce_final.rds")
+ovcar_msc_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/ovcar_msc/downstream_analysis/collapsed_sce_final.rds")
+ovcar_m2_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/ovcar_m2/downstream_analysis/collapsed_sce_final.rds")
+msc_m2_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/msc_m2/downstream_analysis/collapsed_sce_final.rds")
+msc_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/msc/downstream_analysis/collapsed_sce_final.rds")
+m2_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/m2/downstream_analysis/collapsed_sce_final.rds")
+
+################### find doublets ####################
+
+batches <- list(ovcar_filtered_sce, ovcar_msc_m2_filtered_sce, ovcar_msc_filtered_sce,
+                ovcar_m2_filtered_sce, msc_m2_filtered_sce, msc_filtered_sce,
+                m2_filtered_sce)
+
+batch_labels <- c("ovcar", "ovcar_msc_m2", "ovcar_msc",
+                  "ovcar_m2", "msc_m2", "msc", "m2")
+
+
+library(scDblFinder)
+library(scds)
+
+batches_sce.dbl <- list()
+
+for (i in 1:length(batches)){
+  
+  curr_batch_sce <- batches[[i]]
+  
+  set.seed(10010101)
+  curr_batch_sce.dbl <- scDblFinder(curr_batch_sce, clusters=curr_batch_sce$label)
+  curr_batch_sce.dbl <- cxds(curr_batch_sce.dbl,retRes = TRUE, ntop = 500, estNdbl= TRUE)
+  batches_sce.dbl[[i]] <- curr_batch_sce.dbl
+}
+
+```
+
+### Before batch-effect correction visualization
+
+```{r AS_bc_before, fig.width=24, fig.height=21, cache=TRUE}
+
+library(scran)
+library(PCAtools)
+library(Nebulosa)
+library(scater)
+
+system("mkdir -p /path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all")
+out_dir <- "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all"
+
+batch1_sce <- batches_sce.dbl[[1]]
+batch2_sce <- batches_sce.dbl[[2]]
+batch3_sce <- batches_sce.dbl[[3]]
+batch4_sce <- batches_sce.dbl[[4]]
+batch5_sce <- batches_sce.dbl[[5]]
+batch6_sce <- batches_sce.dbl[[6]]
+batch7_sce <- batches_sce.dbl[[7]]
+
+label1 <- "ovcar"
+label2 <- "ovcar_msc_m2"
+label3 <- "ovcar_msc"
+label4 <- "ovcar_m2"
+label5 <- "msc_m2"
+label6 <- "msc"
+label7 <- "m2"
+
+#################### before batch correction #################
+  
+ library(batchelor)
+
+  batch_norm <- multiBatchNorm(batch1_sce, batch2_sce, batch3_sce, batch4_sce,
+                               batch5_sce, batch6_sce, batch7_sce)
+  
+  batch1_sce <- batch_norm[[1]]
+  batch2_sce <- batch_norm[[2]]
+  batch3_sce <- batch_norm[[3]]
+  batch4_sce <- batch_norm[[4]]
+  batch5_sce <- batch_norm[[5]]
+  batch6_sce <- batch_norm[[6]]
+  batch7_sce <- batch_norm[[7]]
+  
+  set.seed(1011011)
+  dec1 <- modelGeneVar(batch1_sce)
+  set.seed(1011011)
+  dec2 <- modelGeneVar(batch2_sce)
+  set.seed(1011011)
+  dec3 <- modelGeneVar(batch3_sce)
+  set.seed(1011011)
+  dec4 <- modelGeneVar(batch4_sce)
+  set.seed(1011011)
+  dec5 <- modelGeneVar(batch5_sce)
+  set.seed(1011011)
+  dec6 <- modelGeneVar(batch6_sce)
+  set.seed(1011011)
+  dec7 <- modelGeneVar(batch7_sce)
+  
+  combined.dec <- combineVar(dec1, dec2, dec3, dec4, dec5, dec6, dec7)
+  chosen.hvgs <- getTopHVGs(combined.dec, n=5000)
+  
+  set.seed(1011011)
+  combined_sce <- correctExperiments(batch1=batch1_sce, 
+                                     batch2=batch2_sce, 
+                                     batch3=batch3_sce,
+                                     batch4=batch4_sce,
+                                     batch5=batch5_sce,
+                                     batch6=batch6_sce,
+                                     batch7=batch7_sce,
+                                     PARAM=NoCorrectParam())
+  
+  set.seed(1011011)
+  combined_sce <- runPCA(combined_sce, subset_row=chosen.hvgs,  
+                         exprs_values = "logcounts")
+  
+  percent.var <- attr(reducedDim(combined_sce, "PCA"), "percentVar")
+  
+  plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)")
+
+  set.seed(1011011)
+  combined_sce <- runUMAP(combined_sce, dimred="PCA", min_dist=0.2,
+                          pca = findElbowPoint(percent.var),
+                          n_neighbors=250, exprs_values = "logcounts")
+  
+  sample <- colData(combined_sce)$batch
+
+  sample[sample == "batch1"] <- label1
+  sample[sample == "batch2"] <- label2
+  sample[sample == "batch3"] <- label3
+  sample[sample == "batch4"] <- label4
+  sample[sample == "batch5"] <- label5
+  sample[sample == "batch6"] <- label6
+  sample[sample == "batch7"] <- label7
+  
+  colData(combined_sce)$sample <- sample
+  
+   ######################### cell-cycle ##########################
+  
+  hs.pairs <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/human_cycle_markers.rds")
+  
+  library(BiocParallel)
+  
+  set.seed(1011011)
+  assignments <- cyclone(combined_sce, hs.pairs, gene.names=rownames(combined_sce),
+                         BPPARAM=MulticoreParam(20), assay.type = "logcounts")
+  combined_sce$cell_cycle_phase <- assignments$phases
+  
+  combined_sce_dr_df <- data.frame(UMAP1 = reducedDim(combined_sce, "UMAP")[,1],
+                                   UMAP2 = reducedDim(combined_sce, "UMAP")[,2],
+                                   sample = colData(combined_sce)$sample,
+                                   
+                                   doublet_status = combined_sce$scDblFinder.class,
+                                   doublet_score = combined_sce$scDblFinder.score,
+                                   
+                                   cxds_call = combined_sce$cxds_call,
+                                   
+                                   GFP = unname(log2(counts(combined_sce)["GFP",] +
+                                               counts(combined_sce)["EGFP",] + 1)),
+                                   mCherry = unname(log2(counts(combined_sce)["mCherry",] + 1)),
+                                   smURFP = unname(log2(counts(combined_sce)["smURFP",] + 1)),
+                           
+                           msc_markers = unname(logcounts(combined_sce)[gene_annotation[gene_annotation$V3 == "NT5E", 
+                                                     "ENSMBL_id"][1],] +
+                                                  logcounts(combined_sce)[gene_annotation[gene_annotation$V3 == "THY1", 
+                                                     "ENSMBL_id"][1],] + 
+                                                  logcounts(combined_sce)[gene_annotation[gene_annotation$V3 == "ENG", 
+                                                     "ENSMBL_id"][1],]), 
+                           
+                           m2_markers = unname(logcounts(combined_sce)[gene_annotation[gene_annotation$V3 == "CD4", 
+                                                     "ENSMBL_id"][1],] +
+                                                logcounts(combined_sce)[gene_annotation[gene_annotation$V3 == "ITGAD", 
+                                                     "ENSMBL_id"][1],] + 
+                                                logcounts(combined_sce)[gene_annotation[gene_annotation$V3 == "CD14", 
+                                                     "ENSMBL_id"][1],] +
+                                                logcounts(combined_sce)[gene_annotation[gene_annotation$V3 == "PTPRC", 
+                                                     "ENSMBL_id"][1],]), 
+                           
+                           ovcar_markers = unname(logcounts(combined_sce)[gene_annotation[gene_annotation$V3 == "EPCAM", 
+                                                     "ENSMBL_id"][1],]),
+                           
+                           lib_size = log2(combined_sce$sum + 1),
+                           features = log2(combined_sce$detected + 1),
+                           sizeFactor = log2(combined_sce$sizeFactor + 1),
+                           cell_cycle_phase = combined_sce$cell_cycle_phase)
+
+  ############################## fluorescent markers ##########################
+  
+  before_bc_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$sample, 0.4, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "Sample", "disc")  
+  before_bc_GFP_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$GFP, combined_sce_dr_df$GFP, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "GFP (log2Exp)", "cont")
+  before_bc_mCherry_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$mCherry, combined_sce_dr_df$mCherry, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "mCherry (log2Exp)", "cont")
+  before_bc_smURFP_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$smURFP, combined_sce_dr_df$smURFP, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "smURFP (log2Exp)", "cont")
+  before_bc_dbl_status_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$doublet_status, 0.4, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "Doublet status", "disc")
+  before_bc_dbl_score_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$doublet_score, 0.4, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "Doublet score", "cont")
+  
+  cxds_call_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$cxds_call, 0.4, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "cxds_call", "disc")
+  
+  before_bc_lib_size_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$lib_size, 0.4, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "log2(lib_size + 1)", "cont")
+  before_bc_features_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$features, 0.4, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "log2(detected_features + 1)", "cont")
+  sizeFactor_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$sizeFactor, 0.4, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "log2(combined_sce$sizeFactor + 1)", "cont")
+  cell_cycle_plot <- dimRed_plot(combined_sce_dr_df$UMAP1, combined_sce_dr_df$UMAP2, 
+                                combined_sce_dr_df$cell_cycle_phase, 0.4, 
+                                "UMAP before batch-effect correction", 
+                                "UMAP1", "UMAP2", "cell_cycle_phase", "disc")
+
+################################ markers density plots ###############################  
+  
+  before_bc_CD73_density_plot <- plot_density(combined_sce, 
+                                              gene_annotation[gene_annotation$V3 == "NT5E", 
+                                                              "ENSMBL_id"][1],
+                                              method = "wkde") + labs(title = "CD73")
+  before_bc_CD90_density_plot <- plot_density(combined_sce, 
+                                              gene_annotation[gene_annotation$V3 == "THY1", 
+                                                              "ENSMBL_id"][1],
+                                              method = "wkde") + labs(title = "CD90")
+  before_bc_CD4_density_plot <- plot_density(combined_sce, 
+                                             gene_annotation[gene_annotation$V3 == "CD4", 
+                                                             "ENSMBL_id"][1],
+                                             method = "wkde") + labs(title = "CD4")
+  before_bc_CD45_density_plot <- plot_density(combined_sce, 
+                                              gene_annotation[gene_annotation$V3 == "PTPRC", 
+                                                              "ENSMBL_id"][1],
+                                              method = "wkde") + labs(title = "CD45")
+  before_bc_EPCAM_density_plot <- plot_density(combined_sce, 
+                                               gene_annotation[gene_annotation$V3 == "EPCAM", 
+                                                               "ENSMBL_id"][1],
+                                               method = "wkde") + labs(title = "EPCAM")
+  
+  
+ 
+  
+pdf(file=paste0(out_dir, "/no_BE_correction_plots.pdf"), width = 9, height = 8)
+  print(before_bc_plot)
+  print(before_bc_GFP_plot)
+  print(before_bc_mCherry_plot)
+  print(before_bc_smURFP_plot)
+  print(before_bc_CD73_density_plot)
+  print(before_bc_CD90_density_plot)
+  print(before_bc_CD4_density_plot)
+  print(before_bc_CD45_density_plot)
+  print(before_bc_EPCAM_density_plot)
+  print(before_bc_dbl_status_plot)
+  print(before_bc_dbl_score_plot)
+  print(cxds_call_plot)
+  print(before_bc_lib_size_plot)
+  print(before_bc_features_plot)
+  print(sizeFactor_plot)
+  print(cell_cycle_plot)
+  dev.off()  
+  
+ggarrange(before_bc_plot, before_bc_GFP_plot, before_bc_mCherry_plot, before_bc_mCherry_plot,
+          before_bc_CD73_density_plot, before_bc_CD90_density_plot, before_bc_CD4_density_plot,
+          before_bc_CD45_density_plot, before_bc_EPCAM_density_plot, before_bc_dbl_status_plot,
+          before_bc_dbl_score_plot, cxds_call_plot, before_bc_lib_size_plot, before_bc_features_plot,
+          sizeFactor_plot, cell_cycle_plot)
+  
+```
+
+### Filter-out doublets
+
+```{r filter_doublets, cache=TRUE}
+
+library(bluster)
+
+combined_no_db_hi_lib_sce <-  combined_sce[,(combined_sce$scDblFinder.class == "singlet") &
+                                             (log2(combined_sce$sum + 1) > 10)]
+
+combined_no_db_hi_lib_sce.dec <- modelGeneVar(combined_no_db_hi_lib_sce)
+combined_no_db_hi_lib.chosen.hvgs <- getTopHVGs(combined_no_db_hi_lib_sce.dec, n=500)
+
+set.seed(1011011)
+combined_no_db_hi_lib_sce <- runPCA(combined_no_db_hi_lib_sce, 
+                                    subset_row=combined_no_db_hi_lib.chosen.hvgs,  
+                                    exprs_values = "logcounts")
+
+percent.var <- attr(reducedDim(combined_no_db_hi_lib_sce, "PCA"), "percentVar")
+  
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)")
+
+pca = findElbowPoint(percent.var)
+
+set.seed(1011011)
+combined_no_db_hi_lib_sce <- runUMAP(combined_no_db_hi_lib_sce, dimred="PCA", min_dist=0.6, 
+                                     pca = findElbowPoint(percent.var),
+                                     n_neighbors=250, exprs_values = "logcounts")
+
+plotUMAP(combined_no_db_hi_lib_sce, color_by = "sample", point_size = 0.5)
+
+############# cluster ################
+
+set.seed(1011011)
+combined_no_db_hi_lib_sce.cl <- clusterCells(combined_no_db_hi_lib_sce, use.dimred = "PCA",
+                                      BLUSPARAM=TwoStepParam(first=KmeansParam(centers=1000,
+                                                                               iter.max=50),
+                                                             second=NNGraphParam(k=5)))
+table(combined_no_db_hi_lib_sce.cl)
+colLabels(combined_no_db_hi_lib_sce) <- combined_no_db_hi_lib_sce.cl
+fwrite(data.frame(table(combined_no_db_hi_lib_sce.cl)), paste0(out_dir, "/keep_BE_cluster_cell_numbers.txt"), sep = "\t")
+
+saveRDS(combined_no_db_hi_lib_sce, paste0(out_dir, "/combined_no_db_hi_lib_sce.rds"))
+saveRDS(combined_sce, paste0(out_dir, "/combined_sce.rds"))
+
+```
+
+* the files are saved in the directory with name "all".
+* The initial combined SCE object is stored as the combined_sce.rds file 
+* the SCE object after doublets and low library sized cell filtering is stored as the combined_no_db_hi_lib_sce.rds file
+* number of cells in each cluster (unannotated) is stored in the tsv file keep_BE_cluster_cell_numbers.txt
+
+### Plot high library size samples with no doublets
+
+```{r no_db_hi_lib_plots, fig.width=20, fig.height=14, cache=TRUE}
+
+no_bc_hi_lib_df <- data.frame(UMAP1 = reducedDim(combined_no_db_hi_lib_sce, "UMAP")[,1],
+                              UMAP2 = reducedDim(combined_no_db_hi_lib_sce, "UMAP")[,2],
+                              
+                              GFP = unname(log2(counts(combined_no_db_hi_lib_sce)["GFP",] +
+                                                counts(combined_no_db_hi_lib_sce)["EGFP",] + 1)),
+                             mCherry = unname(log2(counts(combined_no_db_hi_lib_sce)["mCherry",] + 1)),
+                             smURFP = unname(log2(counts(combined_no_db_hi_lib_sce)["smURFP",] + 1)),
+                             
+                             msc_markers = unname(logcounts(combined_no_db_hi_lib_sce)[gene_annotation[gene_annotation$V3 == "THY1", 
+                                                     "ENSMBL_id"][1],]), 
+                             
+                             m2_markers = unname(logcounts(combined_no_db_hi_lib_sce)[gene_annotation[gene_annotation$V3 == "PTPRC", 
+                                                     "ENSMBL_id"][1],]), 
+                             
+                             ovcar_markers = unname(logcounts(combined_no_db_hi_lib_sce)[gene_annotation[gene_annotation$V3 == "EPCAM", 
+                                                     "ENSMBL_id"][1],]), 
+                             
+                             sample = colData(combined_no_db_hi_lib_sce)$sample,
+                             lib_size = log2(combined_no_db_hi_lib_sce$sum + 1),
+                             features = log2(combined_no_db_hi_lib_sce$detected + 1),
+                             mt_perc = combined_no_db_hi_lib_sce$subsets_Mito_percent,
+                             cluster = combined_no_db_hi_lib_sce$label,
+                             cell_cycle_phase = combined_no_db_hi_lib_sce$cell_cycle_phase)
+
+  no_bc_df <- no_bc_hi_lib_df
+
+  no_bc_df$MSC_stat <- rep("not expressed", nrow(no_bc_df))
+  no_bc_df$M2_stat <- rep("not expressed", nrow(no_bc_df))
+  no_bc_df$OVCAR_stat <- rep("not expressed", nrow(no_bc_df))
+  
+  no_bc_df[no_bc_df$msc_markers > 0.15,]$MSC_stat <- "expressed"  
+  no_bc_df[no_bc_df$m2_markers > 0.15,]$M2_stat <- "expressed"
+  no_bc_df[no_bc_df$ovcar_markers > 0.15,]$OVCAR_stat <- "expressed"
+  
+  
+  no_bc_df$cluster <- factor(no_bc_df$cluster,
+                             levels = levels(no_bc_df$cluster))
+  
+  no_bc_sample_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                                    no_bc_df$sample, 0.4,
+                                    "UMAP (colored by sample)",
+                                    "UMAP1", "UMAP2", "Cluster", "disc")
+  
+  
+no_bc_cluster_plot <- ggplot(no_bc_df, aes(x = UMAP1, y = UMAP2, colour = cluster)) +
+    geom_point(alpha = 0.5, size = 0.4) + 
+    ggtitle("cluster labels") +
+    xlab("UMAP1") + ylab("UMAP2") +
+    scale_colour_discrete(name = "cluster") +
+    theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                    size=14, face="bold"),
+          
+          strip.background = element_blank(),
+          strip.text.x = element_blank(),
+          panel.border = element_rect(color = "black", 
+                                      fill = NA, size = 1), 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), 
+          panel.background = element_blank(), 
+          axis.text.x = element_text(size = 14, hjust = 1),
+          axis.text.y= element_text(size = 14, hjust = 1),
+          legend.position="top") + guides(color = guide_legend(override.aes = list(size = 3)))
+
+  cluster_labels_df <- no_bc_df %>% group_by(cluster) %>% dplyr::select(UMAP1, UMAP2) %>% summarize_all(mean)
+
+  no_bc_cluster_plot <- no_bc_cluster_plot +  geom_label_repel(data = cluster_labels_df, aes(label = cluster))
+  
+  no_bc_GFP_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                                    no_bc_df$GFP, no_bc_df$GFP,
+                                    "GFP",
+                                    "UMAP1", "UMAP2", "GFP", "cont")
+  
+  no_bc_mCherry_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                                        no_bc_df$mCherry, no_bc_df$mCherry,
+                                        "mCherry",
+                                        "UMAP1", "UMAP2", "mCherry", "cont")
+  
+  no_bc_smURFP_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                                       no_bc_df$smURFP, no_bc_df$smURFP,
+                                       "smURFP",
+                                       "UMAP1", "UMAP2", "smURFP", "cont")
+  
+  no_bc_lib_size_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                                       no_bc_df$lib_size, 0.4,
+                                       "Library size",
+                                       "UMAP1", "UMAP2", "lib_size", "cont")
+  
+  no_bc_features_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                                       no_bc_df$features, 0.4,
+                                       "Detected features",
+                                       "UMAP1", "UMAP2", "features", "cont")
+  
+  no_bc_mt_perc_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                              no_bc_df$mt_perc, 0.4,
+                              "Mito percent",
+                              "UMAP1", "UMAP2", "Mito precent", "cont")
+
+  no_bc_msc_markers_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                              no_bc_df$msc_markers, no_bc_df$msc_markers,
+                              "MSC markers",
+                              "UMAP1", "UMAP2", "log2(counts)", "cont")
+  no_bc_msc_stat_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                              no_bc_df$MSC_stat, 0.4,
+                              "CD90 expression status",
+                              "UMAP1", "UMAP2", "status", "disc")
+  
+  no_bc_m2_markers_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                              no_bc_df$m2_markers, no_bc_df$m2_markers,
+                              "M2 markers",
+                              "UMAP1", "UMAP2", "log2(counts)", "cont")
+  no_bc_m2_stat_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                              no_bc_df$M2_stat, 0.4,
+                              "CD45 expression status",
+                              "UMAP1", "UMAP2", "status", "disc")
+   cell_cycle_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                              no_bc_df$cell_cycle_phase, 0.4,
+                              "M2 markers expression status",
+                              "UMAP1", "UMAP2", "status", "disc")
+  
+  no_bc_ovcar_markers_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                              no_bc_df$ovcar_markers, no_bc_df$ovcar_markers,
+                              "OVCAR markers",
+                              "UMAP1", "UMAP2", "log2(counts)", "cont")
+  no_bc_ovcar_stat_plot <- dimRed_plot(no_bc_df$UMAP1, no_bc_df$UMAP2,
+                              no_bc_df$OVCAR_stat, 0.4,
+                              "EPCAM expression status",
+                              "UMAP1", "UMAP2", "status", "disc")
+
+  ################ density plots #############################
+  
+  library(Nebulosa)
+  no_bc_CD73_density_plot <- plot_density(combined_no_db_hi_lib_sce, 
+                                    gene_annotation[gene_annotation$V3 == "NT5E", 
+                                                    "ENSMBL_id"][1], 
+                                    method = "wkde") + labs(title = "CD73")
+  no_bc_CD90_density_plot <- plot_density(combined_no_db_hi_lib_sce, 
+                                    gene_annotation[gene_annotation$V3 == "THY1", 
+                                                    "ENSMBL_id"][1],
+                                    method = "wkde") + labs(title = "CD90")
+  no_bc_CD105_density_plot <- plot_density(combined_no_db_hi_lib_sce, 
+                                     gene_annotation[gene_annotation$V3 == "ENG", 
+                                                     "ENSMBL_id"][1],
+                                     method = "wkde") + labs(title = "CD105")
+  
+  no_bc_CD4_density_plot <- plot_density(combined_no_db_hi_lib_sce, 
+                                   gene_annotation[gene_annotation$V3 == "CD4", 
+                                                   "ENSMBL_id"][1],
+                                   method = "wkde") + labs(title = "CD4")
+  no_bc_CD11D_density_plot <- plot_density(combined_no_db_hi_lib_sce, 
+                                     gene_annotation[gene_annotation$V3 == "ITGAD", 
+                                                     "ENSMBL_id"][1],
+                                     method = "wkde") + labs(title = "CD11D")
+  no_bc_CD14_density_plot <- plot_density(combined_no_db_hi_lib_sce, 
+                                    gene_annotation[gene_annotation$V3 == "CD14", 
+                                                    "ENSMBL_id"][1],
+                                    method = "wkde") + labs(title = "CD14")
+  no_bc_CD45_density_plot <- plot_density(combined_no_db_hi_lib_sce, 
+                                    gene_annotation[gene_annotation$V3 == "PTPRC", 
+                                                    "ENSMBL_id"][1],
+                                    method = "wkde") + labs(title = "CD45")
+  
+  no_bc_EPCAM_density_plot <- plot_density(combined_no_db_hi_lib_sce, 
+                                     gene_annotation[gene_annotation$V3 == "EPCAM", 
+                                                     "ENSMBL_id"][1],
+                                     method = "wkde") + labs(title = "EPCAM")
+  
+  no_bc_dim_red_plots <- ggarrange(no_bc_sample_plot, no_bc_cluster_plot,
+                             no_bc_GFP_plot, no_bc_mCherry_plot, 
+                             no_bc_smURFP_plot, cell_cycle_plot,
+                             ncol = 3, nrow = 2)
+  no_bc_lib_features_plots <- ggarrange(no_bc_cluster_plot, no_bc_lib_size_plot, 
+                                  no_bc_features_plot, no_bc_mt_perc_plot,
+                                  ncol = 3, nrow = 2)
+  no_bc_MSC_plots <- ggarrange(no_bc_cluster_plot, no_bc_CD73_density_plot, 
+                         no_bc_CD90_density_plot, no_bc_CD105_density_plot,
+                         ncol = 3, nrow = 2)
+  no_bc_M2_plots <- ggarrange(no_bc_cluster_plot, no_bc_CD4_density_plot, 
+                            no_bc_CD11D_density_plot, no_bc_CD14_density_plot, 
+                            no_bc_CD45_density_plot, ncol = 3, nrow = 2)
+  no_bc_OVCAR_plots <- ggarrange(no_bc_cluster_plot, no_bc_EPCAM_density_plot,
+                           ncol = 3, nrow = 2)
+  no_bc_markers_plots <- ggarrange(no_bc_cluster_plot,
+                             no_bc_msc_markers_plot, no_bc_m2_markers_plot, 
+                             no_bc_ovcar_markers_plot,
+                             ncol = 3, nrow = 2)
+  no_bc_markers_status_plots <- ggarrange(no_bc_cluster_plot,
+                             no_bc_msc_stat_plot, no_bc_m2_stat_plot, 
+                             no_bc_ovcar_stat_plot,
+                             ncol = 3, nrow = 2)
+  
+  pdf(file=paste0(out_dir, "/no_bc_no_db_hi_lib_plot.pdf"), width = 18, height = 12)
+  print(no_bc_dim_red_plots)
+  no_bc_lib_features_plots
+  print(no_bc_MSC_plots)
+  print(no_bc_M2_plots)
+  print(no_bc_OVCAR_plots)
+  print(no_bc_markers_plots)
+  print(no_bc_markers_status_plots)
+  cell_cycle_plot
+  dev.off()
+
+  print(no_bc_dim_red_plots)
+  no_bc_lib_features_plots
+  print(no_bc_MSC_plots)
+  print(no_bc_M2_plots)
+  print(no_bc_OVCAR_plots)
+  print(no_bc_markers_plots)
+  print(no_bc_markers_status_plots)
+
+```
+
+* dimensionality reduction plots after filtering out doublets and low library size cells are stored in the all/no_bc_no_db_hi_lib_plot.pdf file
+
+## Are the same cells expressing GFP, mCherry and smURFP
+
+```{r simult_GFP, fig.width=20, fig.height=18, cache=TRUE}
+
+sim_GFP_smURFP <- combined_no_db_hi_lib_sce
+sim_GFP_smURFP$GFP <- counts(sim_GFP_smURFP)["GFP",] + counts(sim_GFP_smURFP)["EGFP",]
+sim_GFP_smURFP$smURFP <- counts(sim_GFP_smURFP)["smURFP",]
+sim_GFP_smURFP$mCherry <- counts(sim_GFP_smURFP)["mCherry",]
+
+
+sim_GFP_smURFP$GFP_exp <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$smURFP_exp <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$mCherry_exp <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$GFP_smURFP <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$GFP_mCherry <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$smURFP_mCherry <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$GFP_smURFP_mCherry <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$dblts_trplts <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$EPCAM_exp <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$CD90_exp <- rep("No", dim(sim_GFP_smURFP)[2])
+sim_GFP_smURFP$CD45_exp <- rep("No", dim(sim_GFP_smURFP)[2])
+
+sim_GFP_smURFP$log_EPCAM <- logcounts(sim_GFP_smURFP)[gene_annotation[gene_annotation$V3 == "EPCAM", 
+                                                                      "ENSMBL_id"][1],]
+sim_GFP_smURFP$log_CD90 <- logcounts(sim_GFP_smURFP)[gene_annotation[gene_annotation$V3 == "THY1", 
+                                                                      "ENSMBL_id"][1],]
+sim_GFP_smURFP$log_CD45 <- logcounts(sim_GFP_smURFP)[gene_annotation[gene_annotation$V3 == "PTPRC", 
+                                                                      "ENSMBL_id"][1],]
+
+colData(sim_GFP_smURFP)[(log2(sim_GFP_smURFP$GFP + 1) > 1),]$GFP_exp <- "Yes"
+colData(sim_GFP_smURFP)[(log2(sim_GFP_smURFP$smURFP + 1) > 1),]$smURFP_exp <- "Yes"
+colData(sim_GFP_smURFP)[(log2(sim_GFP_smURFP$mCherry + 1) > 1),]$mCherry_exp <- "Yes"
+
+colData(sim_GFP_smURFP)[((log2(sim_GFP_smURFP$GFP + 1)  > 1) & 
+                           (log2(sim_GFP_smURFP$smURFP + 1) > 1)),]$GFP_smURFP <- "Yes"
+colData(sim_GFP_smURFP)[((log2(sim_GFP_smURFP$GFP + 1) > 1) & 
+                           (log2(sim_GFP_smURFP$mCherry + 1) > 1)),]$GFP_mCherry <- "Yes"
+colData(sim_GFP_smURFP)[((log2(sim_GFP_smURFP$mCherry + 1) > 1) & 
+                           (log2(sim_GFP_smURFP$smURFP + 1) > 1)),]$smURFP_mCherry <- "Yes"
+colData(sim_GFP_smURFP)[((log2(sim_GFP_smURFP$GFP + 1) > 0.9) &
+                           (log2(sim_GFP_smURFP$mCherry + 1) > 0.9) & 
+                           (log2(sim_GFP_smURFP$smURFP + 1) > 0.9)),]$GFP_smURFP_mCherry <- "Yes"
+
+colData(sim_GFP_smURFP)[((sim_GFP_smURFP$GFP_smURFP == "Yes") | 
+                           (sim_GFP_smURFP$GFP_mCherry == "Yes") |
+                           (sim_GFP_smURFP$smURFP_mCherry == "Yes")),]$dblts_trplts <- "Yes"
+
+colData(sim_GFP_smURFP)[(sim_GFP_smURFP$log_EPCAM > 0),]$EPCAM_exp <- "Yes"
+colData(sim_GFP_smURFP)[(sim_GFP_smURFP$log_CD90 > 0),]$CD90_exp <- "Yes"
+colData(sim_GFP_smURFP)[(sim_GFP_smURFP$log_CD45 > 0),]$CD45_exp <- "Yes"
+
+GFP_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "GFP_exp")
+smURFP_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "smURFP_exp")
+mCherry_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "mCherry_exp")
+GFP_smURFP_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "GFP_smURFP")
+GFP_mCherry_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "GFP_mCherry")
+smURFP_mCherry_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "smURFP_mCherry")
+log_EPCAM_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "EPCAM_exp")
+log_CD90_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "CD90_exp")
+log_CD45_plot <- plotUMAP(sim_GFP_smURFP, colour_by = "CD45_exp")
+
+sim_GFP_smURFP_df <- data.frame(UMAP1 = reducedDim(sim_GFP_smURFP, "UMAP")[,1],
+                                UMAP2 = reducedDim(sim_GFP_smURFP, "UMAP")[,2],
+                                
+                                GFP = colData(sim_GFP_smURFP)$GFP_exp,
+                                mCherry = colData(sim_GFP_smURFP)$mCherry_exp,
+                                smURFP = colData(sim_GFP_smURFP)$smURFP_exp,
+                                
+                                GFP_smURFP = colData(sim_GFP_smURFP)$GFP_smURFP,
+                                GFP_mCherry = colData(sim_GFP_smURFP)$GFP_mCherry,
+                                smURFP_mCherry = colData(sim_GFP_smURFP)$smURFP_mCherry,
+                                GFP_smURFP_mCherry = colData(sim_GFP_smURFP)$GFP_smURFP_mCherry,
+                                dblts_trplts = colData(sim_GFP_smURFP)$dblts_trplts,
+                                doublet_score = colData(sim_GFP_smURFP)$scDblFinder.score)
+
+
+GFP_exp_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$GFP, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "GFP", "disc")
+mCherry_exp_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$mCherry, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "mCherry", "disc")
+smURFP_exp_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$smURFP, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "smURFP", "disc")
+GFP_smURFP_exp_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$GFP_smURFP, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "GFP_smURFP", "disc")
+GFP_mCherry_exp_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$GFP_mCherry, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "GFP_mCherry", "disc")
+smURFP_mCherry_exp_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$smURFP_mCherry, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "smURFP_mCherry", "disc")
+GFP_smURFP_mCherry_exp_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$GFP_smURFP_mCherry, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "GFP_smURFP_mCherry", "disc")
+dblts_trplts_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$dblts_trplts, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "dblts_trplts", "disc")
+doublet_score_plot <- dimRed_plot(sim_GFP_smURFP_df$UMAP1, sim_GFP_smURFP_df$UMAP2,
+                                       sim_GFP_smURFP_df$doublet_score, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "Doublet score", "cont")
+
+pdf(file=paste0(out_dir, "/simultaneous_marker_exp.pdf"), width = 9, height = 8)
+  print(GFP_exp_plot)
+  print(mCherry_exp_plot)
+  print(smURFP_exp_plot)
+  print(GFP_smURFP_exp_plot)
+  print(GFP_mCherry_exp_plot)
+  print(smURFP_mCherry_exp_plot)
+  print(GFP_smURFP_mCherry_exp_plot)
+  print(dblts_trplts_plot)
+  dev.off()
+
+plot(density(log2(sim_GFP_smURFP$GFP + 1)))
+plot(density(log2(sim_GFP_smURFP$smURFP + 1)))
+plot(density(log2(sim_GFP_smURFP$mCherry + 1)))
+
+ggarrange(GFP_exp_plot, mCherry_exp_plot, smURFP_exp_plot,
+          GFP_smURFP_exp_plot, GFP_mCherry_exp_plot, smURFP_mCherry_exp_plot,
+          GFP_smURFP_mCherry_exp_plot, dblts_trplts_plot)
+
+```
+
+* the plots for the visualization of simultaneous expression are saved in the simultaneous_marker_exp.pdf file
+
+## Investigate cells expressing multiple fluorescent markers
+
+```{r investigate_mult_markers, fig.width=20, fig.height=6, cache=TRUE}
+
+simult_exp <- data.frame(total_cells = rep(as.numeric(table(sim_GFP_smURFP$label)),7),
+                         cells = c(as.numeric(table(sim_GFP_smURFP[,sim_GFP_smURFP$GFP_exp == "Yes"]$label)),
+                                   as.numeric(table(sim_GFP_smURFP[,sim_GFP_smURFP$smURFP_exp == "Yes"]$label)),
+                                   as.numeric(table(sim_GFP_smURFP[,sim_GFP_smURFP$mCherry_exp == "Yes"]$label)),
+                                   as.numeric(table(sim_GFP_smURFP[,sim_GFP_smURFP$GFP_smURFP == "Yes"]$label)),
+                                   as.numeric(table(sim_GFP_smURFP[,sim_GFP_smURFP$GFP_mCherry == "Yes"]$label)),
+                                   as.numeric(table(sim_GFP_smURFP[,sim_GFP_smURFP$smURFP_mCherry == "Yes"]$label)),
+                                   as.numeric(table(sim_GFP_smURFP[,sim_GFP_smURFP$GFP_smURFP_mCherry == "Yes"]$label))),
+                         marker = c(rep("GFP", 16),
+                                    rep("smURFP", 16),
+                                    rep("mCherry", 16),
+                                    rep("GFP_smURFP", 16),
+                                    rep("GFP_mCherry", 16),
+                                    rep("smURFP_mCherry", 16),
+                                    rep("GFP_smURFP_mCherry", 16)),
+                         cluster = rep(as.character(1:16),7))
+
+precent_cells <- (simult_exp$cells/simult_exp$total_cells) * 100
+
+simult_exp$cluster <- factor(simult_exp$cluster,
+                             levels = c("1", "6", "12",
+                                        "2", "7", "8", "15", "16",
+                                        "4", "5", "10", "13", "9",
+                                        "3", "11", "14"))
+
+simult_exp_plot <- ggplot(simult_exp, aes(fill=marker, y=cells, x=cluster)) + 
+                          geom_bar(position="stack", stat="identity") +
+                          theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                    size=14, face="bold"),
+          
+          strip.background = element_blank(),
+          strip.text.x = element_blank(),
+          panel.border = element_rect(color = "black", 
+                                      fill = NA, size = 1), 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), 
+          panel.background = element_blank(), 
+          axis.text.x = element_text(size = 14, hjust = 1),
+          axis.text.y= element_text(size = 14, hjust = 1),
+          legend.position="top") + guides(color = guide_legend(override.aes = list(size = 3)))
+
+ggarrange(no_bc_sample_plot, no_bc_cluster_plot, simult_exp_plot, nrow = 1)
+
+```
+
+## filter out dual expressing cells
+
+```{r filter_dual_exp, fig.width=20, fig.height=18, cache=TRUE}
+
+dual_filtered_sce <- sim_GFP_smURFP[,!(sim_GFP_smURFP$GFP_smURFP == "Yes")]
+dual_filtered_sce <- dual_filtered_sce[,!(dual_filtered_sce$GFP_mCherry == "Yes")]
+dual_filtered_sce <- dual_filtered_sce[,!(dual_filtered_sce$smURFP_mCherry == "Yes")]
+dual_filtered_sce <- dual_filtered_sce[,!(dual_filtered_sce$GFP_smURFP_mCherry == "Yes")]
+
+dual_filtered_sce <- dual_filtered_sce[,!(dual_filtered_sce$cxds_call == "TRUE")]
+
+dual_filtered_df <- data.frame(UMAP1 = reducedDim(dual_filtered_sce, "UMAP")[,1],
+                               UMAP2 = reducedDim(dual_filtered_sce, "UMAP")[,2],
+                               
+                               GFP_exp = dual_filtered_sce$GFP_exp,
+                               mCherry_exp = dual_filtered_sce$mCherry_exp,
+                               smURFP_exp = dual_filtered_sce$smURFP_exp,
+                               
+                               sample = dual_filtered_sce$sample,
+                               cluster = dual_filtered_sce$label,
+                               cxds_score = dual_filtered_sce$cxds_score,
+                               cxds_call = dual_filtered_sce$cxds_call,
+                               sizeFactor = dual_filtered_sce$sizeFactor,
+                               cell_cycle_phase = dual_filtered_sce$cell_cycle_phase)
+
+dual_filtered_df$sample_cluster <- dual_filtered_df$cluster
+
+dual_filtered_df$cluster <- factor(dual_filtered_df$cluster,
+                                   levels = levels(dual_filtered_df$cluster))
+  
+dual_filtered_sample_plot <- dimRed_plot(dual_filtered_df$UMAP1, dual_filtered_df$UMAP2,
+                                            dual_filtered_df$sample, 0.4,
+                                            "UMAP (colored by sample)",
+                                            "UMAP1", "UMAP2", "Sample", "disc")
+  
+  
+dual_filtered_cluster_plot <- ggplot(dual_filtered_df, aes(x = UMAP1, y = UMAP2, 
+                                                           colour = cluster)) +
+    geom_point(alpha = 0.5, size = 0.4) + 
+    ggtitle("cluster labels") +
+    xlab("UMAP1") + ylab("UMAP2") +
+    scale_colour_discrete(name = "cluster") +
+    theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                    size=14, face="bold"),
+          
+          strip.background = element_blank(),
+          strip.text.x = element_blank(),
+          panel.border = element_rect(color = "black", 
+                                      fill = NA, size = 1), 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), 
+          panel.background = element_blank(), 
+          axis.text.x = element_text(size = 14, hjust = 1),
+          axis.text.y= element_text(size = 14, hjust = 1),
+          legend.position="top") + guides(color = guide_legend(override.aes = list(size = 3)))
+
+dual_filtered_cluster_labels_df <- dual_filtered_df %>% group_by(cluster) %>% dplyr::select(UMAP1, UMAP2) %>% summarize_all(mean)
+
+dual_filtered_cluster_plot <- dual_filtered_cluster_plot +  geom_label_repel(data = dual_filtered_cluster_labels_df, aes(label = cluster))
+
+dual_filtered_GFP_plot <- dimRed_plot(dual_filtered_df$UMAP1, dual_filtered_df$UMAP2,
+                                            dual_filtered_df$GFP_exp, 0.4,
+                                            "UMAP (colored by GFP exp)",
+                                            "UMAP1", "UMAP2", "GFP_exp", "disc")
+
+dual_filtered_mCherry_plot <- dimRed_plot(dual_filtered_df$UMAP1, dual_filtered_df$UMAP2,
+                                            dual_filtered_df$mCherry_exp, 0.4,
+                                            "UMAP (colored by mCherry exp)",
+                                            "UMAP1", "UMAP2", "mCherry_exp", "disc")
+
+dual_filtered_smURFP_plot <- dimRed_plot(dual_filtered_df$UMAP1, dual_filtered_df$UMAP2,
+                                            dual_filtered_df$smURFP_exp, 0.4,
+                                            "UMAP (colored by smURFP)",
+                                            "UMAP1", "UMAP2", "smURFP_exp", "disc")
+dual_filtered_cxds_score_plot <- dimRed_plot(dual_filtered_df$UMAP1, dual_filtered_df$UMAP2,
+                                            dual_filtered_df$cxds_score, 0.4,
+                                            "UMAP (colored by cxds_score)",
+                                            "UMAP1", "UMAP2", "cxds_score", "cont")
+dual_filtered_cxds_call_plot <- dimRed_plot(dual_filtered_df$UMAP1, dual_filtered_df$UMAP2,
+                                            dual_filtered_df$cxds_call, 0.4,
+                                            "UMAP (colored by cxds_call)",
+                                            "UMAP1", "UMAP2", "cxds_call", "disc")
+
+sizeFactor_colored_plot <- dimRed_plot(dual_filtered_df$UMAP1, dual_filtered_df$UMAP2,
+                                       log(dual_filtered_df$sizeFactor + 1), 0.4,
+                                       "UMAP (colored by sizeFactor)",
+                                       "UMAP1", "UMAP2", "sizeFactor", "cont")
+cell_cycle_plot <- dimRed_plot(dual_filtered_df$UMAP1, dual_filtered_df$UMAP2,
+                                       dual_filtered_df$cell_cycle_phase, 0.4,
+                                       "UMAP (colored by cell_cycle_phase)",
+                                       "UMAP1", "UMAP2", "cell_cycle_phase", "disc")
+
+dual_filtered_sce_meta <- colData(dual_filtered_sce) %>% as.data.frame()
+dual_filtered_sce$cxds_call <- factor(dual_filtered_sce$cxds_call, ordered = TRUE,
+                                     levels = c("TRUE", "FALSE"))
+
+simult_exp <- data.frame(total_cells = rep(as.numeric(table(dual_filtered_sce$label)),7),
+                         cells = c(as.numeric(table(dual_filtered_sce[,dual_filtered_sce$GFP_exp == "Yes"]$label)),
+                                   as.numeric(table(dual_filtered_sce[,dual_filtered_sce$smURFP_exp == "Yes"]$label)),
+                                   as.numeric(table(dual_filtered_sce[,dual_filtered_sce$mCherry_exp == "Yes"]$label)),
+                                   as.numeric(table(dual_filtered_sce[,dual_filtered_sce$GFP_smURFP == "Yes"]$label)),
+                                   as.numeric(table(dual_filtered_sce[,dual_filtered_sce$GFP_mCherry == "Yes"]$label)),
+                                   as.numeric(table(dual_filtered_sce[,dual_filtered_sce$smURFP_mCherry == "Yes"]$label)),
+                                   as.numeric(table(dual_filtered_sce[,dual_filtered_sce$GFP_smURFP_mCherry == "Yes"]$label))),
+                         marker = c(rep("GFP", 16),
+                                    rep("smURFP", 16),
+                                    rep("mCherry", 16),
+                                    rep("GFP_smURFP", 16),
+                                    rep("GFP_mCherry", 16),
+                                    rep("smURFP_mCherry", 16),
+                                    rep("GFP_smURFP_mCherry", 16)),
+                         cluster = rep(as.character(1:16),7))
+
+precent_cells <- (simult_exp$cells/simult_exp$total_cells) * 100
+
+simult_exp$cluster <- factor(simult_exp$cluster,
+                             levels = c("1", "6", "12",
+                                        "2", "7", "8", "15", "16",
+                                        "4", "5", "10", "13", "9",
+                                        "3", "11", "14"))
+
+simult_exp_plot <- ggplot(simult_exp, aes(fill=marker, y=cells, x=cluster)) + 
+                          geom_bar(position="stack", stat="identity") +
+                          theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                    size=14, face="bold"),
+          
+          strip.background = element_blank(),
+          strip.text.x = element_blank(),
+          panel.border = element_rect(color = "black", 
+                                      fill = NA, size = 1), 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), 
+          panel.background = element_blank(), 
+          axis.text.x = element_text(size = 14, hjust = 1),
+          axis.text.y= element_text(size = 14, hjust = 1),
+          legend.position="top") + guides(color = guide_legend(override.aes = list(size = 3)))
+
+dual_filtered_dim_red_plots <- ggarrange(dual_filtered_sample_plot, dual_filtered_cluster_plot,
+                                         dual_filtered_GFP_plot, dual_filtered_mCherry_plot, 
+                                         dual_filtered_smURFP_plot, dual_filtered_cxds_call_plot, 
+                                         sizeFactor_colored_plot, simult_exp_plot, cell_cycle_plot,
+                                         ncol = 3, nrow = 3)
+
+table(dual_filtered_sce$cell_cycle_phase, dual_filtered_sce$label)
+table(dual_filtered_sce$cell_cycle_phase, dual_filtered_sce$sample)
+
+# Need to wrap the phase vector in a DataFrame:
+diff <- getVarianceExplained(dual_filtered_sce, DataFrame(dual_filtered_sce$cell_cycle_phase))
+plot(density(as.numeric(!is.na(diff))))
+discard <- diff > 0.5
+summary(discard)
+
+dual_filtered_disc_sce <- dual_filtered_sce[which(!discard),]
+
+dual_filtered_disc_sce.dec <- modelGeneVar(dual_filtered_disc_sce)
+dual_filtered_disc_sce.dec.chosen.hvgs <- getTopHVGs(dual_filtered_disc_sce.dec, n=500)
+
+set.seed(1011011)
+dual_filtered_disc_sce <- scater::runPCA(dual_filtered_disc_sce, 
+                                    subset_row=dual_filtered_disc_sce.dec.chosen.hvgs,  
+                                    exprs_values = "logcounts")
+
+percent.var <- attr(reducedDim(dual_filtered_disc_sce, "PCA"), "percentVar")
+  
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)")
+
+pca = findElbowPoint(percent.var)
+
+set.seed(1011011)
+dual_filtered_disc_sce <- scater::runUMAP(dual_filtered_disc_sce, dimred="PCA", min_dist=0.6, 
+                                     pca = findElbowPoint(percent.var),
+                                     n_neighbors=120, exprs_values = "logcounts")
+
+plotUMAP(dual_filtered_disc_sce, color_by = "sample", point_size = 0.5)
+
+ggplot(dual_filtered_df, aes(y=sizeFactor, x=cluster)) + 
+                          geom_bar(position="stack", stat="identity") +
+                          theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                    size=14, face="bold"),
+          
+          strip.background = element_blank(),
+          strip.text.x = element_blank(),
+          panel.border = element_rect(color = "black", 
+                                      fill = NA, size = 1), 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), 
+          panel.background = element_blank(), 
+          axis.text.x = element_text(size = 14, hjust = 1),
+          axis.text.y= element_text(size = 14, hjust = 1),
+          legend.position="top") + guides(color = guide_legend(override.aes = list(size = 3)))
+
+```
+
+``` {r explore_uknown_clustr, fig.width=20, fig.height=12, cache=TRUE}
+
+###########################################################################
+############ different markers expressing cells density plot ##############
+###########################################################################
+
+dual_filtered_df$CD73_logcount <- as.numeric(logcounts(dual_filtered_sce[gene_annotation[gene_annotation$V3 == "NT5E",
+                                                                                    "ENSMBL_id"][1],]))
+dual_filtered_sce$CD73_logcount <- as.numeric(logcounts(dual_filtered_sce[gene_annotation[gene_annotation$V3 == "NT5E",
+                                                                                    "ENSMBL_id"][1],]))
+
+dual_filtered_df$EPCAM_logcount <- as.numeric(logcounts(dual_filtered_sce[gene_annotation[gene_annotation$V3 == "EPCAM",
+                                                                                    "ENSMBL_id"][1],]))
+dual_filtered_sce$EPCAM_logcount <- as.numeric(logcounts(dual_filtered_sce[gene_annotation[gene_annotation$V3 == "EPCAM",
+                                                                                    "ENSMBL_id"][1],]))
+
+dual_filtered_df$CD45_logcount <- as.numeric(logcounts(dual_filtered_sce[gene_annotation[gene_annotation$V3 == "PTPRC",
+                                                                                    "ENSMBL_id"][1],]))
+dual_filtered_sce$CD45_logcount <- as.numeric(logcounts(dual_filtered_sce[gene_annotation[gene_annotation$V3 == "PTPRC",
+                                                                                    "ENSMBL_id"][1],]))
+
+dual_filtered_df <- as.data.frame(dual_filtered_df)
+
+dual_filtered_df$EPCAM_sub_CD73 <- dual_filtered_df$EPCAM_logcount - dual_filtered_df$CD73_logcount
+
+############# MSC markers expressing cells ###################
+
+MSC_density_plot <- ggplot(dual_filtered_df, aes(x=CD73_logcount, ..scaled.., color=cluster)) +
+                           geom_density() + 
+                           facet_wrap( ~ cluster) +
+                           scale_colour_discrete(name = "cluster") +
+                           theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                                           size=14, face="bold"),
+                                 strip.background = element_blank(),
+                                 panel.border = element_rect(color = "black", 
+                                                             fill = NA, size = 1), 
+                                 panel.grid.major = element_blank(), 
+                                 panel.grid.minor = element_blank(), 
+                                 panel.background = element_blank(), 
+                                 axis.text.x = element_text(size = 14, hjust = 1),
+                                 axis.text.y= element_text(size = 14, hjust = 1),
+                                 legend.position="top") 
+
+############# OVCAR markers expressing cells ###################
+
+OVCAR_density_plot <- ggplot(dual_filtered_df, aes(x=EPCAM_logcount, ..scaled.., color=cluster)) +
+                           geom_density() + facet_wrap( ~ cluster) +
+                           scale_colour_discrete(name = "cluster") +
+                           theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                                           size=14, face="bold"),
+                                 strip.background = element_blank(),
+                                 panel.border = element_rect(color = "black", 
+                                                             fill = NA, size = 1), 
+                                 panel.grid.major = element_blank(), 
+                                 panel.grid.minor = element_blank(), 
+                                 panel.background = element_blank(), 
+                                 axis.text.x = element_text(size = 14, hjust = 1),
+                                 axis.text.y= element_text(size = 14, hjust = 1),
+                                 legend.position="top")
+
+############# CD45 markers expressing cells ###################
+
+CD45_density_plot <- ggplot(dual_filtered_df, aes(x=CD45_logcount, ..scaled.., color=cluster)) +
+                           geom_density() + facet_wrap( ~ cluster) +
+                           scale_colour_discrete(name = "cluster") +
+                           theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                                           size=14, face="bold"),
+                                 strip.background = element_blank(),
+                                 panel.border = element_rect(color = "black", 
+                                                             fill = NA, size = 1), 
+                                 panel.grid.major = element_blank(), 
+                                 panel.grid.minor = element_blank(), 
+                                 panel.background = element_blank(), 
+                                 axis.text.x = element_text(size = 14, hjust = 1),
+                                 axis.text.y= element_text(size = 14, hjust = 1),
+                                 legend.position="top")
+
+############# Are the same cells expressing mutliple cell-type markers? ##################
+
+EPCAM_sub_CD73_density_plot <- ggplot(dual_filtered_df, aes(x=EPCAM_sub_CD73, ..scaled.., color=cluster)) +
+                           geom_density() + facet_wrap( ~ cluster) +
+                           scale_colour_discrete(name = "cluster") +
+                           theme(plot.title = element_text(hjust = 0.5, color="black", 
+                                                           size=14, face="bold"),
+                                 strip.background = element_blank(),
+                                 panel.border = element_rect(color = "black", 
+                                                             fill = NA, size = 1), 
+                                 panel.grid.major = element_blank(), 
+                                 panel.grid.minor = element_blank(), 
+                                 panel.background = element_blank(), 
+                                 axis.text.x = element_text(size = 14, hjust = 1),
+                                 axis.text.y= element_text(size = 14, hjust = 1),
+                                 legend.position="top") 
+
+dual_filtered_sce$CD73_EPCAM <- rep("FALSE", dim(dual_filtered_sce)[2])
+dual_filtered_sce[,(dual_filtered_sce$CD73_logcount >= 0.2) & 
+                    (dual_filtered_sce$EPCAM_logcount >= 0.2)]$CD73_EPCAM <- "TRUE"
+
+dual_filtered_sce$CD73_CD45 <- rep("FALSE", dim(dual_filtered_sce)[2])
+dual_filtered_sce[,(dual_filtered_sce$CD73_logcount >= 0.2) & 
+                    (dual_filtered_sce$CD45_logcount >= 0.2)]$CD73_EPCAM <- "TRUE"
+
+dual_filtered_sce$EPCAM_CD45 <- rep("FALSE", dim(dual_filtered_sce)[2])
+dual_filtered_sce[,(dual_filtered_sce$EPCAM_logcount >= 0.2) & 
+                    (dual_filtered_sce$CD45_logcount >= 0.2)]$CD73_EPCAM <- "TRUE"
+
+dual_filtered_sce$CD73_EPCAM_CD45 <- rep("FALSE", dim(dual_filtered_sce)[2])
+dual_filtered_sce[,(dual_filtered_sce$CD73_logcount >= 0.2) & 
+                    (dual_filtered_sce$EPCAM_logcount >= 0.2) &
+                    (dual_filtered_sce$CD45_logcount >= 0.2)]$CD73_EPCAM <- "TRUE"
+
+
+ggarrange(dual_filtered_sample_plot, dual_filtered_cluster_plot,
+          MSC_density_plot, OVCAR_density_plot, 
+          CD45_density_plot, EPCAM_sub_CD73_density_plot,
+          ncol = 3, nrow = 2)
+
+ggarrange(plotUMAP(dual_filtered_sce, color_by = "CD73_EPCAM", point_size = 0.5),
+          plotUMAP(dual_filtered_sce, color_by = "CD73_CD45", point_size = 0.5),
+          plotUMAP(dual_filtered_sce, color_by = "EPCAM_CD45", point_size = 0.5),
+          plotUMAP(dual_filtered_sce, color_by = "CD73_EPCAM_CD45", point_size = 0.5),
+          plotUMAP(dual_filtered_sce, color_by = "sizeFactor", point_size = 0.5),
+          ncol = 3, nrow = 2)
+
+saveRDS(dual_filtered_sce, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/dual_filtered_sce.RDS")
+
+```
+
+
+* Cells deemed as dual expression markers are further filtered out and the resulting SCE object is saved as dual_filtered_sce.RDS
+
+```{r separate_cells}
+
+clust_11_dual_filtered_sce <- dual_filtered_sce[c(gene_annotation[gene_annotation$V3 == "EPCAM",
+                                                                  "ENSMBL_id"][1], 
+                                                  gene_annotation[gene_annotation$V3 == "THY1",
+                                                                  "ENSMBL_id"][1],
+                                                  gene_annotation[gene_annotation$V3 == "PTPRC",
+                                                                  "ENSMBL_id"][1]),
+                                                dual_filtered_sce$label == 11]
+
+clust_11_dual_filtered_sce <- runUMAP(clust_11_dual_filtered_sce,  n_neighbors=100, min_dist=1)
+clust_11_dual_filtered_sce$cluster_num <- clusterCells(clust_11_dual_filtered_sce, 
+                                                       assay.type = "logcounts")
+
+clust_11_dual_filtered_sce$log_FLG <-  as.numeric(logcounts(dual_filtered_sce)[gene_annotation[gene_annotation$V3 == "FLG", 
+                                                                                                 "ENSMBL_id"][1],
+                                                                                 colnames(clust_11_dual_filtered_sce)])
+clust_11_dual_filtered_sce$log_MUC16 <-  as.numeric(logcounts(dual_filtered_sce)[gene_annotation[gene_annotation$V3 == "MUC16", 
+                                                                                                 "ENSMBL_id"][1],
+                                                                                 colnames(clust_11_dual_filtered_sce)])
+
+
+clust_3_dual_filtered_sce <- dual_filtered_sce[c(gene_annotation[gene_annotation$V3 == "EPCAM",
+                                                                  "ENSMBL_id"][1], 
+                                                  gene_annotation[gene_annotation$V3 == "THY1",
+                                                                  "ENSMBL_id"][1],
+                                                  gene_annotation[gene_annotation$V3 == "PTPRC",
+                                                                  "ENSMBL_id"][1]),
+                                                dual_filtered_sce$label == 3]
+
+clust_3_dual_filtered_sce <- runUMAP(clust_3_dual_filtered_sce,  n_neighbors=250, min_dist=0.2)
+clust_3_dual_filtered_sce$cluster_num <- clusterCells(clust_3_dual_filtered_sce, 
+                                                       assay.type = "logcounts")
+
+clust_14_dual_filtered_sce <- dual_filtered_sce[c(gene_annotation[gene_annotation$V3 == "EPCAM",
+                                                                  "ENSMBL_id"][1], 
+                                                  gene_annotation[gene_annotation$V3 == "THY1",
+                                                                  "ENSMBL_id"][1],
+                                                  gene_annotation[gene_annotation$V3 == "PTPRC",
+                                                                  "ENSMBL_id"][1]),
+                                                dual_filtered_sce$label == 14]
+
+clust_14_dual_filtered_sce <- runUMAP(clust_14_dual_filtered_sce,  n_neighbors=250, min_dist=0.2)
+clust_14_dual_filtered_sce$cluster_num <- clusterCells(clust_14_dual_filtered_sce, 
+                                                       assay.type = "logcounts")
+
+plotUMAP(clust_11_dual_filtered_sce, colour_by = "log_EPCAM")
+plotUMAP(clust_11_dual_filtered_sce, colour_by = "log_CD45")
+plotUMAP(clust_11_dual_filtered_sce, colour_by = "log_CD90")
+plotUMAP(clust_11_dual_filtered_sce, colour_by = "cluster_num")
+plotUMAP(clust_11_dual_filtered_sce, colour_by = "total")
+plotUMAP(clust_11_dual_filtered_sce, colour_by = "log_FLG")
+plotUMAP(clust_11_dual_filtered_sce, colour_by = "log_MUC16")
+
+plotUMAP(clust_3_dual_filtered_sce, colour_by = "log_EPCAM")
+plotUMAP(clust_3_dual_filtered_sce, colour_by = "log_CD45")
+plotUMAP(clust_3_dual_filtered_sce, colour_by = "log_CD90")
+plotUMAP(clust_3_dual_filtered_sce, colour_by = "cluster_num")
+
+plotUMAP(clust_14_dual_filtered_sce, colour_by = "log_EPCAM")
+plotUMAP(clust_14_dual_filtered_sce, colour_by = "log_CD45")
+plotUMAP(clust_14_dual_filtered_sce, colour_by = "log_CD90")
+plotUMAP(clust_14_dual_filtered_sce, colour_by = "cluster_num")
+
+```
+
+## cell annotation using SingleR 
+
+```{r cell_annot}
+
+library(celldex)
+ref <- BlueprintEncodeData(ensembl=TRUE)
+
+library(SingleR)
+pred <- SingleR(test=dual_filtered_sce, ref=ref, 
+                labels=ref$label.main,
+                BPPARAM=BiocParallel::MulticoreParam(20))
+table(pred$labels)
+
+tab <- table(Assigned=pred$pruned.labels, Cluster=dual_filtered_sce$label)
+
+# Adding a pseudo-count of 10 to avoid strong color jumps with just 1 cell.
+library(pheatmap)
+
+plotScoreHeatmap(pred)
+pheatmap(log2(tab+10), color=colorRampPalette(c("white", "blue"))(101))
+
+```
+
+
+## Do GFP and smURFP expressing cells in unknown cluster separate?
+
+```{r unknown_clust, fig.width=12, fig.height=12}
+
+unknown_clust_sce <- dual_filtered_sce[,(dual_filtered_sce$label == 11)]
+
+set.seed(1011011)
+unknown_clust_sce.dec <- modelGeneVar(unknown_clust_sce)
+
+unknown_clust_sce.hvgs <- getTopHVGs(unknown_clust_sce.dec, n=10000)
+
+set.seed(1011011)
+unknown_clust_sce <- runPCA(unknown_clust_sce, subset_row=unknown_clust_sce.hvgs,  
+                                    exprs_values = "logcounts",ncomponents = 6)
+
+percent.var <- attr(reducedDim(unknown_clust_sce, "PCA"), "percentVar")
+
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)")
+
+pca = findElbowPoint(percent.var)
+
+set.seed(1011011)
+unknown_clust_sce <- runUMAP(unknown_clust_sce, dimred="PCA", min_dist=0.1, 
+                             pca = findElbowPoint(percent.var),
+                             n_neighbors = 5, ntop = 2000,
+                             exprs_values = "logcounts", ncomponents = 6)
+
+plotUMAP(unknown_clust_sce,  color_by = "GFP_exp", 
+         ncomponents = 6, point_size = 0.3)
+plotUMAP(unknown_clust_sce,  color_by = "mCherry_exp", 
+         ncomponents = 6, point_size = 0.3)
+plotUMAP(unknown_clust_sce,  color_by = "smURFP_exp",
+         ncomponents = 6, point_size = 0.3)
+
+plotUMAP(unknown_clust_sce,  color_by = "log_EPCAM", 
+         ncomponents = 6, point_size = 0.3)
+plotUMAP(unknown_clust_sce,  color_by = "log_CD90", 
+         ncomponents = 6, point_size = 0.3)
+plotUMAP(unknown_clust_sce,  color_by = "log_CD45",
+         ncomponents = 6, point_size = 0.3)
+
+plotPCA(unknown_clust_sce, color_by = "GFP_exp",
+        ncomponents = 6, point_size = 0.3)
+plotPCA(unknown_clust_sce, color_by = "smURFP_exp",
+        ncomponents = 6, point_size = 0.3)
+
+```
+
+## comparisons between same cell-types in different cultures
+
+### GSEA 
+
+```{r gsea_func, fig.width=16, fig.height=10, cache=TRUE}
+
+#saveRDS(dual_filtered_sce, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/dual_filtered_sce.rds")
+
+library(clusterProfiler)
+
+ens2gene_2 <- ens2gene
+ens2gene_2[ens2gene_2$V3 == "",]$V3 <- ens2gene_2[ens2gene_2$V3 == "",]$ENSMBL_id
+
+gsea_plots <- function(gene_marker_info, samples, Halmmark_path, out_dir){
+  
+    for (i in 1:length(gene_marker_info)){
+
+    chosen <- gene_marker_info[[i]]
+
+    ordered <- chosen[order(chosen$rank.AUC),]
+    
+    gene_list <- ordered$median.logFC.cohen
+    #names(gene_list) <- ens2gene[rownames(ordered[1:1000,]),]$V3 
+    
+    names(gene_list) <- rownames(ordered) 
+    
+    gene_list <- na.omit(gene_list)
+    gene_list = sort(gene_list, decreasing = TRUE)
+    
+    set.seed(1011011)
+    gse <- gseGO(geneList=gene_list, ont ="ALL", keyType = "ENSEMBL", 
+                 minGSSize = 10, pvalueCutoff = 0.05, verbose = TRUE, 
+                 OrgDb = "org.Hs.eg.db", pAdjustMethod = "fdr", 
+                 nPermSimple = 10000, scoreType = "pos")
+    
+    names(gene_list) <-  ens2gene_2[names(gene_list),]$V3 
+    
+    set.seed(1011011)
+    gsea <-   GSEA(gene_list, TERM2GENE=Halmmark_path, verbose=FALSE,
+                 minGSSize = 10, nPermSimple = 10000, pAdjustMethod = "fdr", 
+                 pvalueCutoff = 0.05)
+    
+    rownames(ordered) <-  ens2gene_2[rownames(ordered),]$V3 
+    
+    fwrite(as.data.frame(ordered), paste0(out_dir, "/", 
+                                         samples[i], 
+                                         "_gse.txt"),
+           sep = "\t", row.names = TRUE, col.names = TRUE)
+    
+    tryCatch({
+      
+      library(enrichplot)
+      
+      pdf(paste0(out_dir, "/", samples[i],  "_gsea_plots.pdf"), 
+          width = 25, height = 20)
+      
+      set.seed(1011011)
+      print(ggarrange(dotplot(gse, split=".sign", showCategory=50) + facet_grid(.~.sign), 
+                      emapplot(pairwise_termsim(gse), showCategory=50), 
+                      ncol = 2, nrow = 1))
+      
+      set.seed(1011011)
+      print(ggarrange(dotplot(gsea, split=".sign", showCategory=50) + facet_grid(.~.sign),
+                      emapplot(pairwise_termsim(gsea), showCategory=50),
+                      ncol = 2, nrow = 1))
+      
+      set.seed(1011011)
+      print(cnetplot(gsea, color.params = list(foldChange=gene_list), max.overlap = 10000, 
+                     node_label = "all", cex.params = list(category_node = 0.5, 
+                                                           category_label = 0.7, 
+                                                           gene_label=0.4), 
+                     showCategory=50, layout='kk', shadowtext = "category"))
+      
+      set.seed(1011011)
+      print(cnetplot(gsea, color.params = list(foldChange=gene_list), max.overlap = 10000, 
+                     node_label = "all", cex.params = list(category_node = 0.5, 
+                                                           category_label = 0.7, 
+                                                           gene_label=0.4), 
+                     showCategory=c("HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+                                    "HALLMARK_TGF_BETA_SIGNALING",
+                                    "HALLMARK_INFLAMMATORY_RESPONSE",
+                                    "HALLMARK_IL6_JAK_STAT3_SIGNALING",
+                                    "HALLMARK_HYPOXIA",
+                                    "HALLMARK_HEDGEHOG_SIGNALING",
+                                    "HALLMARK_E2F_TARGETS",
+                                    "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+                                    "HALLMARK_ESTROGEN_RESPONSE_EARLY",
+                                    "HALLMARK_MYC_TARGETS_V1",
+                                    "HALLMARK_IL2_STAT5_SIGNALING",
+                                    "HALLMARK_G2M_CHECKPOINT",
+                                    "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+                                    "HALLMARK_ESTROGEN_RESPONSE_LATE",
+                                    "HALLMARK_WNT_BETA_CATENIN_SIGNALING",
+                                    "HALLMARK_APOPTOSIS",
+                                    "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION"), 
+                     layout='kk', shadowtext = "category"))
+      
+      dev.off() 
+      }, error = function(e) -999)
+    }
+}
+
+```
+
+### GSEA by comparing all co-cultures against mono-cultures
+
+```{r gsea_comp, cache=TRUE}
+
+library(scran)
+
+dual_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/dual_filtered_sce.rds")
+hallmark_path <- read.gmt("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/h.all.v2023.1.Hs.symbols.gmt.txt")
+out_dir <- "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all"  
+
+all_sce <- dual_filtered_sce
+
+cell_id <- colData(all_sce)[,c("label", "sample")]
+cell_id$cell_id <- as.character(cell_id$label)
+cell_id <- as.data.frame(cell_id)
+
+cell_id[(cell_id$label %in% c(4,5,9,10,13)) & (cell_id$sample == "ovcar"),]$cell_id <- "ovcar_mono"
+cell_id[(cell_id$label %in% c(4,5,9,10,13)) & (cell_id$sample == "ovcar_msc"),]$cell_id <- "ovcar_w_msc"
+cell_id[(cell_id$label %in% c(4,5,9,10,13)) & (cell_id$sample == "ovcar_m2"),]$cell_id <- "ovcar_w_m2"
+cell_id[(cell_id$label %in% c(4,5,9,10,13)) & (cell_id$sample == "ovcar_msc_m2"),]$cell_id <- "ovcar_w_msc_m2"
+
+cell_id[(cell_id$label %in% c(1,6)) & (cell_id$sample == "msc"),]$cell_id <- "mcs_mono"
+cell_id[(cell_id$label %in% c(1,6)) & (cell_id$sample == "ovcar_msc"),]$cell_id <- "msc_w_ovcar"
+cell_id[(cell_id$label %in% c(1,6)) & (cell_id$sample == "msc_m2"),]$cell_id <- "msc_w_m2"
+cell_id[(cell_id$label %in% c(1,6)) & (cell_id$sample == "ovcar_msc_m2"),]$cell_id <- "msc_w_ovcar_m2"
+
+cell_id[(cell_id$label %in% c(2,7,8,15,16)) & (cell_id$sample == "m2"),]$cell_id <- "m2_mono"
+cell_id[(cell_id$label %in% c(2,7,8,15,16)) & (cell_id$sample == "ovcar_m2"),]$cell_id <- "m2_w_ovcar"
+cell_id[(cell_id$label %in% c(2,7,8,15,16)) & (cell_id$sample == "msc_m2"),]$cell_id <- "m2_w_msc"
+cell_id[(cell_id$label %in% c(2,7,8,15,16)) & (cell_id$sample == "ovcar_msc_m2"),]$cell_id <- "m2_w_ovcar_msc"
+
+all_sce$cell_id <- cell_id$cell_id
+  
+################### cluster-wise ################
+
+set.seed(1011011)
+gene_marker_info <- scoreMarkers(all_sce, 
+                                 all_sce$cell_id,
+                                 assay.type = "logcounts",
+                                 pairings = list(c("ovcar_w_msc_m2", "ovcar_w_msc", "ovcar_w_m2",
+                                                   "msc_w_ovcar_m2", "msc_w_ovcar", "msc_w_m2",
+                                                   "m2_w_ovcar_msc", "m2_w_ovcar", "m2_w_msc"),
+                                                 c("ovcar_mono", "ovcar_mono", "ovcar_mono",
+                                                   "mcs_mono", "mcs_mono", "mcs_mono",
+                                                   "m2_mono", "m2_mono", "m2_mono")))
+
+saveRDS(gene_marker_info, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_types_v_respective_mono_cultures/gene_marker_info.rds")
+
+samples <- names(gene_marker_info)
+gsea_plots(gene_marker_info, samples, hallmark_path, 
+           paste0(out_dir, "/cell_types_v_respective_mono_cultures"))
+
+################## cluster 11 ##################
+
+compar_labels <- c("ovcar_w_msc_m2", "ovcar_mono", 
+                   "msc_w_ovcar_m2", "mcs_mono", "14",
+                   "m2_w_ovcar_msc", "m2_mono", "3")
+
+set.seed(1011011)
+
+for (i in 1:length(compar_labels)){
+  gene_marker_info <- scoreMarkers(all_sce, 
+                                 all_sce$cell_id,
+                                 assay.type = "logcounts",
+                                 pairings = list(c("11"),
+                                                 c(compar_labels[i])))
+  saveRDS(gene_marker_info, paste0(out_dir, "/cluster_11/",  compar_labels[i], 
+                                   "_gene_marker_info.rds"))
+  samples <- c(compar_labels[i])
+  gsea_plots(gene_marker_info, samples, hallmark_path, 
+           paste0(out_dir, "/cluster_11"))
+}
+
+################## cluster 3 ##################
+
+compar_labels <- c("m2_w_ovcar_msc", "m2_mono", "11")
+
+set.seed(1011011)
+
+for (i in 1:length(compar_labels)){
+  gene_marker_info <- scoreMarkers(all_sce, 
+                                 all_sce$cell_id,
+                                 assay.type = "logcounts",
+                                 pairings = list(c("3"),
+                                                 c(compar_labels[i])))
+  saveRDS(gene_marker_info, paste0(out_dir, "/cluster_3/",  compar_labels[i], 
+                                   "_gene_marker_info.rds"))
+  samples <- c(compar_labels[i])
+  gsea_plots(gene_marker_info, samples, hallmark_path, 
+           paste0(out_dir, "/cluster_3"))
+}
+
+################## cluster 14 ##################
+
+compar_labels <- c("msc_w_ovcar_m2", "mcs_mono", "11")
+
+set.seed(1011011)
+
+for (i in 1:length(compar_labels)){
+  gene_marker_info <- scoreMarkers(all_sce, 
+                                 all_sce$cell_id,
+                                 assay.type = "logcounts",
+                                 pairings = list(c("14"),
+                                                 c(compar_labels[i])))
+  saveRDS(gene_marker_info, paste0(out_dir, "/cluster_14/",  compar_labels[i], 
+                                   "_gene_marker_info.rds"))
+  samples <- c(compar_labels[i])
+  gsea_plots(gene_marker_info, samples, hallmark_path, 
+           paste0(out_dir, "/cluster_14"))
+}
+
+################## all_clusters ###################
+
+set.seed(1011011)
+gene_marker_info <- scoreMarkers(all_sce[,!(all_sce$cell_id == "5")], 
+                                 all_sce[,!(all_sce$cell_id == "5")]$cell_id,
+                                 assay.type = "logcounts")
+
+saveRDS(gene_marker_info, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/all_clusters/all_clusters_gene_marker_info.rds")
+
+samples <- names(gene_marker_info)
+gsea_plots(gene_marker_info, samples, hallmark_path, 
+           paste0(out_dir, "/all_clusters"))
+
+
+```
+
+### GSEA by comparing ovcar co-cultures and cluster 11 against ovcar monoculture
+
+```{r combined_gsea, fig.width=27, fig.height=12}
+
+library(scran)
+library(clusterProfiler)
+
+ens2gene_2 <- ens2gene
+ens2gene_2[ens2gene_2$V3 == "",]$V3 <- ens2gene_2[ens2gene_2$V3 == "",]$ENSMBL_id
+
+combined_gsea <- function(gene_marker_info, Halmmark_path, samples){
+  results_list <- list()
+  
+  for (i in 1:length(gene_marker_info)) {
+    
+    sample <- samples[i]
+    
+    chosen <- gene_marker_info[[i]]
+    ordered <- chosen[order(chosen$rank.AUC),]
+    
+    gene_list <- ordered$median.logFC.cohen
+    names(gene_list) <- rownames(ordered)
+    
+    gene_list <- na.omit(gene_list)
+    gene_list <- sort(gene_list, decreasing = TRUE)
+    
+    names(gene_list) <- ens2gene_2[names(gene_list),]$V3
+    
+    set.seed(1011011)
+    gsea <- GSEA(gene_list, TERM2GENE = Halmmark_path, 
+                 verbose = FALSE, minGSSize = 10,
+                 nPermSimple = 10000, pAdjustMethod = "fdr", 
+                 pvalueCutoff = 0.05)
+    
+    gsea_result <- gsea@result
+    
+    gene_ratio <- sapply(1:nrow(gsea_result), function(idx) {
+      genes_in_set <- unlist(strsplit(gsea_result$core_enrichment[idx], "/"))
+      length(genes_in_set) / gsea_result$setSize[idx]
+    })
+    
+    result_df <- data.frame(
+      ID = gsea_result$ID,
+      enrichmentScore = gsea_result$enrichmentScore,
+      NES = gsea_result$NES,
+      pvalue = gsea_result$pvalue,
+      p.adjust = gsea_result$p.adjust,
+      rank = rank(-gsea_result$enrichmentScore),
+      GeneRatio = gene_ratio,
+      core_enrichment = gsea_result$core_enrichment
+    )
+    
+    # Sort by adjusted p-value and select top 50 categories
+    result_df <- result_df[order(result_df$p.adjust), ]
+    result_df <- head(result_df, 50)
+    
+    result_df$comparison <- rep(sample, nrow(result_df))
+    
+    results_list[[i]] <- result_df
+  }
+  
+  final_results <- do.call(rbind, results_list)
+  return(final_results)
+}
+
+dual_filtered_sce <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/dual_filtered_sce.rds")
+hallmark_path <- read.gmt("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/h.all.v2023.1.Hs.symbols.gmt.txt")
+out_dir <- "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all"  
+
+all_sce <- dual_filtered_sce
+
+cell_id <- colData(all_sce)[,c("label", "sample")]
+cell_id$cell_id <- as.character(cell_id$label)
+cell_id <- as.data.frame(cell_id)
+
+cell_id[(cell_id$label %in% c(4,5,9,10,13)) & (cell_id$sample == "ovcar"),]$cell_id <- "ovcar_mono"
+cell_id[(cell_id$label %in% c(4,5,9,10,13)) & (cell_id$sample == "ovcar_msc"),]$cell_id <- "ovcar_w_msc"
+cell_id[(cell_id$label %in% c(4,5,9,10,13)) & (cell_id$sample == "ovcar_m2"),]$cell_id <- "ovcar_w_m2"
+cell_id[(cell_id$label %in% c(4,5,9,10,13)) & (cell_id$sample == "ovcar_msc_m2"),]$cell_id <- "ovcar_w_msc_m2"
+
+cell_id[(cell_id$label %in% c(1,6)) & (cell_id$sample == "msc"),]$cell_id <- "mcs_mono"
+cell_id[(cell_id$label %in% c(1,6)) & (cell_id$sample == "ovcar_msc"),]$cell_id <- "msc_w_ovcar"
+cell_id[(cell_id$label %in% c(1,6)) & (cell_id$sample == "msc_m2"),]$cell_id <- "msc_w_m2"
+cell_id[(cell_id$label %in% c(1,6)) & (cell_id$sample == "ovcar_msc_m2"),]$cell_id <- "msc_w_ovcar_m2"
+
+cell_id[(cell_id$label %in% c(2,7,8,15,16)) & (cell_id$sample == "m2"),]$cell_id <- "m2_mono"
+cell_id[(cell_id$label %in% c(2,7,8,15,16)) & (cell_id$sample == "ovcar_m2"),]$cell_id <- "m2_w_ovcar"
+cell_id[(cell_id$label %in% c(2,7,8,15,16)) & (cell_id$sample == "msc_m2"),]$cell_id <- "m2_w_msc"
+cell_id[(cell_id$label %in% c(2,7,8,15,16)) & (cell_id$sample == "ovcar_msc_m2"),]$cell_id <- "m2_w_ovcar_msc"
+
+all_sce$cell_id <- cell_id$cell_id
+
+################### cluster-wise ################
+
+set.seed(1011011)
+gene_marker_info_1 <- scoreMarkers(all_sce, all_sce$cell_id,
+                                 assay.type = "logcounts",
+                                 pairings = list(c("ovcar_w_msc_m2", "ovcar_w_msc", 
+                                                   "ovcar_w_m2", "11"),
+                                                 c("ovcar_mono", "ovcar_mono",
+                                                   "ovcar_mono", "ovcar_mono")))
+
+samples <- paste0(names(gene_marker_info_1), "_vs_ovcar_mono")
+combined_gsea_df <- combined_gsea(gene_marker_info_1, hallmark_path, samples)
+
+set.seed(1011011)
+gene_marker_info_2 <- scoreMarkers(all_sce, all_sce$cell_id,
+                                   assay.type = "logcounts",
+                                   pairings = list(c("11"),
+                                                   c("ovcar_w_msc_m2")))
+
+samples <- paste0(names(gene_marker_info_2), "_vs_ovcar_w_msc_m2")
+combined_gsea_df <- rbind(combined_gsea_df, 
+                          combined_gsea(gene_marker_info_2, 
+                                        hallmark_path, samples))
+combined_gsea_df$comparison <- factor(combined_gsea_df$comparison,
+                                      levels = c("ovcar_w_msc_vs_ovcar_mono",
+                                                 "ovcar_w_m2_vs_ovcar_mono",
+                                                 "ovcar_w_msc_m2_vs_ovcar_mono",
+                                                 "11_vs_ovcar_mono",
+                                                 "11_vs_ovcar_w_msc_m2"))
+library(ggplot2)
+
+plot_gsea_results <- function(result_df) {
+  ggplot(result_df, aes(x = NES, y = reorder(ID, NES))) +
+    geom_point(aes(size = GeneRatio, 
+                   color = p.adjust)) +
+    facet_wrap(.~comparison, ncol = 5)+
+    scale_color_gradient(low = "red", high = "blue", 
+                         name = "Adjusted p-value") +
+    scale_size_continuous(name = "Gene Ratio") +
+    labs(title = element_blank(), 
+         x = "Normalized Enrichment Score (NES)", 
+         y = "Gene Set") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, color="black",
+                                    size=14, face="bold"),
+          axis.title.x = element_text(size=16, face = "bold"),
+          axis.title.y = element_blank(),
+        panel.border = element_rect(color = "black", 
+                                    fill = NA, size = 1), 
+        axis.text.x = element_text(size = 14, hjust = 1),
+        axis.text.y= element_text(size = 14, hjust = 1),
+        strip.text = element_text(size = 16, face = "bold"),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 16, face = "bold"))
+}
+
+plot_gsea_results(combined_gsea_df)
+
+pdf("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/combined_ovca_gsea_plots.pdf", 
+          width = 27, height = 12)
+
+print(plot_gsea_results(combined_gsea_df))
+
+dev.off()
+
+```
+
+```{r}
+
+library(scran)
+library(clusterProfiler)
+
+extrct_core_genes_list <- function(gene_marker_info, result_df, samples) {
+  core_genes_list <- list()
+
+  for (i in 1:length(gene_marker_info)) {
+    core_genes <- lapply(result_df$core_enrichment, function(x) unique(unlist(strsplit(x, "/"))))
+    names(core_genes) <- result_df$ID
+    sample <- samples[i]
+    core_genes_list[[sample]] <- core_genes
+  }
+  return(core_genes_list)
+}
+
+samples <- paste0(names(gene_marker_info_1), "_vs_ovcar_mono")
+core_genes_list_1 <- extrct_core_genes_list(gene_marker_info_1,
+                                            combined_gsea_df, samples)
+
+samples <- paste0(names(gene_marker_info_2), "_vs_ovcar_w_msc_m2")
+core_genes_list_2 <- extrct_core_genes_list(gene_marker_info_2,
+                                            combined_gsea_df, samples)
+
+# Combine core genes lists
+all_core_genes <- c(core_genes_list_1, core_genes_list_2)
+samples <- c(paste0(names(gene_marker_info_1), "_vs_ovcar_mono"),
+             paste0(names(gene_marker_info_2), "_vs_ovcar_w_msc_m2"))
+# Create a dataframe with unique genes for each pathway ID and sample
+unique_genes_df <- data.frame(ID = unique(combined_gsea_df$ID))
+
+for (sample in samples) {
+  sample_genes <- all_core_genes[[sample]]
+  gene_col <- sapply(unique_genes_df$ID, function(id) {
+    if (id %in% names(sample_genes)) {
+      paste(unique(sample_genes[[id]]), collapse = ",")
+    } else {
+      NA
+    }
+  })
+  unique_genes_df[[sample]] <- gene_col
+}
+
+# Save the dataframe to a file
+write.csv(unique_genes_df, "~/path_to_your_file/unique_genes_per_pathway_sample.csv", row.names = FALSE)
+
+# Print the dataframe
+print(unique_genes_df)
+
+```
+
+```{r plot_EMT_Wnt_hmap, fig.height=26, fig.width=18}
+
+library(ComplexHeatmap)
+
+EMT_exp_mtx <- as.matrix(assay(dual_filtered_sce)[ens2gene_2[ens2gene_2$V3 %in% gsea@geneSets$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION,]$ENSMBL_id,])
+
+ovcar_cell_ids <- cell_id[cell_id$cell_id %in% c("ovcar_mono", "ovcar_w_msc",
+                                            "ovcar_w_m2","ovcar_w_msc_m2", "11"),]
+
+EMT_exp_mtx_ovcar <- EMT_exp_mtx[,ovcar_cell_ids$label]
+rownames(EMT_exp_mtx_ovcar) <- ens2gene_2[rownames(EMT_exp_mtx_ovcar),]$V3
+EMT_exp_mtx_ovcar <- EMT_exp_mtx_ovcar[rowSums(EMT_exp_mtx_ovcar != 0) > 0, ]
+
+heatmap_split <- Heatmap(EMT_exp_mtx_ovcar,
+                         top_annotation = HeatmapAnnotation(cell_id = ovcar_cell_ids$cell_id),
+                         # column_split = ovcar_cell_ids$cell_id,
+                         cluster_rows = TRUE,
+                         col = viridis(n = 120, alpha = 1,
+                                       begin = 0, end = 1,
+                                       option = "viridis"),
+                         show_column_names = FALSE,
+                         na_col = "Grey")
+
+heatmap_split
+
+```
+
+## Is cluster 11 a partial EM transitioning cluster?
+
+```{r explore_EMT, fig.height=12}
+
+EMT_hallmark_path <- read.gmt("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION.v2023.1.Hs.gmt")
+
+all_sce_2 <- all_sce
+rownames(all_sce_2) <- ens2gene_2[rownames(all_sce_2),]$V3
+
+cell_id <- colData(all_sce_2)[,c("label", "cell_id")]
+cell_id <- as.data.frame(cell_id)
+
+cell_id <- cell_id %>% arrange(factor(cell_id, levels = c("mcs_mono", "msc_w_m2", "msc_w_ovcar", "msc_w_ovcar_m2",
+                                                          "14", "12", "11", "ovcar_w_msc_m2", "ovcar_w_msc",
+                                                          "ovcar_mono", "5", "ovcar_w_m2",
+                                                          "3", "m2_w_ovcar_msc", "m2_w_msc", "m2_w_ovcar",
+                                                          "m2_mono")))
+cell_id$cell_id <- factor(cell_id$cell_id,
+                          levels = c("mcs_mono", "msc_w_m2", "msc_w_ovcar", "msc_w_ovcar_m2",
+                                     "14", "12", "11", "ovcar_w_msc_m2", "ovcar_w_msc",
+                                     "ovcar_mono", "5", "ovcar_w_m2", "3", "m2_w_ovcar_msc",
+                                     "m2_w_msc", "m2_w_ovcar", "m2_mono"))
+
+Heatmap(as.matrix(logcounts(all_sce_2[EMT_hallmark_path$gene, rownames(cell_id)])),
+        top_annotation = HeatmapAnnotation(Sample = cell_id$cell_id,
+                                           col = list(Sample = c("mcs_mono" = "#3C486B", "msc_w_m2" = "#FC7300",
+                                                                 "msc_w_ovcar" = "#820000",
+                                                                 "msc_w_ovcar_m2" = "#222222", "14" = "#9681EB",
+                                                                 "12" = "#EF6262", "11" = "#1A5D1A", "ovcar_w_msc_m2" = "#FA7070",
+                                                                 "ovcar_w_msc" = "#367E18", "ovcar_mono" = "#2146C7",
+                                                                 "5" = "#C1ECE4", "ovcar_w_m2" = "#C539B4",
+                                                                 "3" = "#FFECEC", "m2_w_ovcar_msc" = "#00C4FF", "m2_w_msc" = "#EA906C",
+                                                                 "m2_w_ovcar" = "#F6FA70", "m2_mono" = "#8EAC50"))),
+        show_row_names = TRUE, show_column_names = FALSE,
+        cluster_rows = TRUE, cluster_columns = FALSE,
+        na_col = "Grey", show_column_dend = FALSE,
+        use_raster = FALSE, row_names_gp = gpar(fontsize = 4))
+
+all_sce_2$ZEB1 <- as.numeric(log2(counts(all_sce_2["ZEB1",])+1))
+all_sce_2$ZEB2 <- as.numeric(log2(logcounts(all_sce_2["ZEB2",])+1))
+all_sce_2$SNAI1 <- as.numeric(log2(logcounts(all_sce_2["SNAI1",])+1))
+all_sce_2$SNAI2 <- as.numeric(log2(logcounts(all_sce_2["SNAI2",])+1))
+all_sce_2$TWIST1 <- as.numeric(log2(logcounts(all_sce_2["TWIST1",])+1))
+all_sce_2$TWIST1 <- as.numeric(log2(logcounts(all_sce_2["TGFB1",])+1))
+all_sce_2$TWIST1 <- as.numeric(log2(logcounts(all_sce_2["EGF",])+1))
+
+
+plotUMAP(all_sce_2, color_by = "ZEB1", point_size = 0.5)
+plotUMAP(all_sce_2, color_by = "ZEB2", point_size = 0.5)
+plotUMAP(all_sce_2, color_by = "SNAI1", point_size = 0.5)
+plotUMAP(all_sce_2, color_by = "SNAI2", point_size = 0.5)
+plotUMAP(all_sce_2, color_by = "TWIST1", point_size = 0.5)
+plotUMAP(all_sce_2, color_by = "TGFB1", point_size = 0.5)
+
+```
+
+
+## ligand-receptor interaction
+
+### All cell-identities 
+
+```{r diff_LR, fig.width=12}
+
+library(CellChat)
+library(patchwork)
+library(umap)
+library(NMF)
+
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+################### ovcar_msc_m2 ##################
+
+dual_filtered_sce_ovcar_msc <- dual_filtered_sce[1:62710,
+                                               (dual_filtered_sce$sample %in% 
+                                                  c("ovcar_msc", "ovcar_msc_m2")) &
+                                                 (!dual_filtered_sce$label %in% 
+                                                    c(2,7,8,3,15))]
+rownames(dual_filtered_sce_ovcar_msc) <- ens2gene_2[rownames(dual_filtered_sce_ovcar_msc),]$V3
+
+dual_filtered_sce_ovcar_msc$cell_id <- as.numeric(dual_filtered_sce_ovcar_msc$label)
+
+dual_filtered_sce_ovcar_msc_meta <- colData(dual_filtered_sce_ovcar_msc)
+
+
+dual_filtered_sce_ovcar_msc_meta[(dual_filtered_sce_ovcar_msc_meta$label %in% c(4,5,9,10,13)) &
+                                   (dual_filtered_sce_ovcar_msc_meta$sample == "ovcar_msc"),]$cell_id <- "ovcar_ovcar_msc"
+dual_filtered_sce_ovcar_msc_meta[(dual_filtered_sce_ovcar_msc_meta$label %in% c(4,5,9,10,13)) &
+                                   (dual_filtered_sce_ovcar_msc_meta$sample == "ovcar_msc_m2"),]$cell_id <- "ovcar_ovcar_msc_m2"
+
+
+dual_filtered_sce_ovcar_msc_meta[(dual_filtered_sce_ovcar_msc_meta$label %in% c(1,6)) &
+                                   (dual_filtered_sce_ovcar_msc_meta$sample == "ovcar_msc"),]$cell_id <- "msc_ovcar_msc"
+dual_filtered_sce_ovcar_msc_meta[(dual_filtered_sce_ovcar_msc_meta$label %in% c(1,6)) &
+                                   (dual_filtered_sce_ovcar_msc_meta$sample == "ovcar_msc_m2"),]$cell_id <- "msc_ovcar_msc_m2"
+
+dual_filtered_sce_ovcar_msc$cell_id <- dual_filtered_sce_ovcar_msc_meta$cell_id
+
+cellchat <- createCellChat(object = dual_filtered_sce_ovcar_msc,
+                           group.by = "cell_id", assay = "logcounts", 
+                           do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/ovca_msc_m2_cellchat.rds")
+
+```
+
+
+### CellChat analysis - ovcar+msc+m2
+
+```{r ligand-receptor, fig.width=12}
+
+library(CellChat)
+library(patchwork)
+library(umap)
+library(NMF)
+
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+################### ovcar_msc_m2 ##################
+
+OVCAR_msc_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in% c(4,5,9,10,13,
+                                                                              1,6,
+                                                                              2,7,8,15,16)) &
+                                        (dual_filtered_sce$sample == "ovcar_msc_m2")]
+rownames(OVCAR_msc_m2_sce) <- ens2gene_2[rownames(OVCAR_msc_m2_sce),]$V3
+
+cell_id <- as.numeric(OVCAR_msc_m2_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(1,6)] <- "msc"
+cell_id[cell_id %in% c(2,7,8,15,16)] <- "m2"
+
+OVCAR_msc_m2_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = OVCAR_msc_m2_sce,
+                           group.by = "cell_id", assay = "logcounts", do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+# 
+# saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/all/cellchat_ovcar_msc_m2.rds")
+cellchat <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/all/cellchat_ovcar_msc_m2.rds")
+cellchat <- netAnalysis_computeCentrality(cellchat)
+
+################## Sender-receiver heatmap ######################
+
+ht1 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+ht2 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming")
+ht1  + ht2
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/all/sender_receiver_hmap.pdf"), width = 12, height = 8)
+print(ht1  + ht2)
+dev.off()
+
+
+#################### circle-plot (common) ########################
+
+mat <- cellchat@net$weight
+groupSize <- as.numeric(table(cellchat@idents))
+
+par(mfrow = c(1,2), xpd=TRUE)
+c1 <- netVisual_circle(mat, vertex.weight = groupSize, 
+                       weight.scale = T, label.edge= F, 
+                       title.name = "Number of interactions",
+                       arrow.size = 1)
+c2 <- netVisual_circle(mat, vertex.weight = groupSize, 
+                       weight.scale = T, label.edge= F,
+                       title.name = "Interaction weights/strength",
+                       arrow.size = 1)
+
+c2
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/all/combined_circle_plot.pdf"), width = 12, height = 8)
+print(c2)
+
+par(mfrow = c(2,4), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), 
+                 ncol = ncol(mat), 
+                 dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  id_wise_plt <- netVisual_circle(mat2, vertex.weight = groupSize, 
+                   weight.scale = T, edge.weight.max = max(mat), 
+                   title.name = rownames(mat)[i],
+                   arrow.size = 1)
+}
+print(id_wise_plt)
+dev.off()
+
+################# circle-plot (signaling-wise) #####################
+
+pathways.show <- c("FGF", "MK", "PERIOSTIN", "VISFATIN", "COMPLEMENT",
+                   "ANGPTL", "SEMA3", "TGFb", "BMP", "GRN", "ACTIVIN",
+                   "SPP1", "ncWNT", "PDGF", "GALECTIN", "LIGHT", "PARs",
+                   "ANNEXIN", "RESISTIN", "GDF", "EGF", "IGF", "NRG", 
+                   "GAS", "IL6", "WNT", "IL16", "IL1", "CCL", "LIFR",
+                   "PROS", "MIF", "TRAIL", "CSF")
+
+for (i in 1:length(pathways.show)){
+  par(mfrow = c(1,1), xpd=TRUE)
+  
+  nv_agg <- netVisual_aggregate(cellchat, vertex.weight = rowSums(cellchat@net$count), 
+                                weight.scale = T, label.edge= F,
+                                arrow.size = 1, signaling = pathways.show[i])
+  nv_hmap <- netVisual_heatmap(cellchat, signaling = pathways.show[i], 
+                               color.heatmap = "Reds")
+  gene_exp <- plotGeneExpression(cellchat, signaling = pathways.show[i])
+  
+  nv_role <- netAnalysis_signalingRole_network(cellchat, signaling = pathways.show[i], 
+                                               width = 8, height = 2.5, font.size = 10)
+  
+  nv_contr <- netAnalysis_contribution(cellchat, signaling = pathways.show[i])
+  
+  nv_bubble <- netVisual_bubble(cellchat, signaling = pathways.show[i], 
+                                remove.isolate = FALSE)
+  
+  pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/all/", 
+                  pathways.show[i],
+                  "_plots.pdf"), 
+      width = 12, height = 8)
+  print(nv_agg)
+  print(nv_hmap)
+  print(gene_exp)
+  print(nv_role)
+  print(nv_contr)
+  print(nv_bubble)
+  dev.off()
+}
+
+
+extractEnrichedLR(cellchat, signaling = c(cellchat@netP[["pathways"]]),
+                  geneLR.return = TRUE)
+netAnalysis_contribution(cellchat, signaling = c(cellchat@netP[["pathways"]]))
+
+################ bubble plot #################
+
+netVisual_bubble(cellchat)
+
+################ heatmap #################
+
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP")
+
+par(mfrow=c(1,1))
+gg1 <- netVisual_heatmap(cellchat)
+#> Do heatmap based on a merged object
+gg2 <- netVisual_heatmap(cellchat, measure = "weight")
+#> Do heatmap based on a merged object
+gg1 + gg2
+
+################ pattern plot ##############
+
+selectK(cellchat, pattern = c("outgoing", "incoming"))
+
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "outgoing", k = 6)
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "incoming", k = 6)
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = rowSums(cellchat@net$count), 
+                 weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = rowSums(cellchat@net$weight), 
+                 weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+netAnalysis_river(cellchat, pattern = "outgoing")
+netAnalysis_river(cellchat, pattern = "incoming")
+netAnalysis_dot(cellchat, pattern = "outgoing")
+netAnalysis_dot(cellchat, pattern = "incoming")
+
+ht1 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+ht2 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming")
+ht1 
+ht2
+
+```
+
+### CellChat analysis - ovcar+msc
+
+```{r ligand-receptor_ovcar_msc, fig.width=8}
+
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+################### ovcar_msc_m2 ##################
+
+OVCAR_msc_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in% c(4,5,9,10,13,
+                                                                           1,6,
+                                                                           14,12)) &
+                                        (dual_filtered_sce$sample == "ovcar_msc")]
+rownames(OVCAR_msc_sce) <- ens2gene_2[rownames(OVCAR_msc_sce),]$V3
+
+cell_id <- as.numeric(OVCAR_msc_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(1,6)] <- "msc"
+
+OVCAR_msc_sce$cell_id <- cell_id
+
+cellchat_ovcar_msc <- createCellChat(object = OVCAR_msc_sce,
+                                     group.by = "cell_id", assay = "logcounts",
+                                     do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat_ovcar_msc@DB <- CellChatDB.use
+
+cellchat_ovcar_msc <- subsetData(cellchat_ovcar_msc)
+future::plan("multisession", workers = 20)
+cellchat_ovcar_msc <- identifyOverExpressedGenes(cellchat_ovcar_msc)
+cellchat_ovcar_msc <- identifyOverExpressedInteractions(cellchat_ovcar_msc)
+
+cellchat_ovcar_msc <- projectData(cellchat_ovcar_msc, PPI.human)
+
+cellchat_ovcar_msc <- computeCommunProb(cellchat_ovcar_msc, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat_ovcar_msc <- filterCommunication(cellchat_ovcar_msc, min.cells = 10)
+
+cellchat_ovcar_msc <- computeCommunProbPathway(cellchat_ovcar_msc)
+
+cellchat_ovcar_msc <- aggregateNet(cellchat_ovcar_msc)
+
+saveRDS(cellchat_ovcar_msc, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cellchat_ovcar_msc.rds")
+
+cellchat <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cellchat_ovcar_msc.rds")
+cellchat <- netAnalysis_computeCentrality(cellchat)
+
+################## Sender-receiver heatmap ######################
+
+ht1 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+ht2 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming")
+ht1  + ht2
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/ovcar_msc/sender_receiver_hmap.pdf"), width = 12, height = 8)
+print(ht1  + ht2)
+dev.off()
+
+
+#################### circle-plot (common) ########################
+
+mat <- cellchat@net$weight
+groupSize <- as.numeric(table(cellchat@idents))
+
+par(mfrow = c(1,2), xpd=TRUE)
+c1 <- netVisual_circle(mat, vertex.weight = groupSize, 
+                       weight.scale = T, label.edge= F, 
+                       title.name = "Number of interactions",
+                       arrow.size = 1)
+c2 <- netVisual_circle(mat, vertex.weight = groupSize, 
+                       weight.scale = T, label.edge= F,
+                       title.name = "Interaction weights/strength",
+                       arrow.size = 1)
+
+c2
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/ovcar_msc/combined_circle_plot.pdf"), width = 12, height = 8)
+print(c2)
+
+par(mfrow = c(2,4), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), 
+                 ncol = ncol(mat), 
+                 dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  id_wise_plt <- netVisual_circle(mat2, vertex.weight = groupSize, 
+                   weight.scale = T, edge.weight.max = max(mat), 
+                   title.name = rownames(mat)[i],
+                   arrow.size = 1)
+}
+print(id_wise_plt)
+dev.off()
+
+
+```
+
+### CellChat analysis - ovcar+m2
+
+```{r ligand-receptor_ovcar_m2, fig.width=8}
+
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+################### ovcar_msc_m2 ##################
+
+OVCAR_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in% c(4,5,9,10,13,
+                                                                          2,7,8,15,16,
+                                                                          3)) &
+                                        (dual_filtered_sce$sample == "ovcar_m2")]
+rownames(OVCAR_m2_sce) <- ens2gene_2[rownames(OVCAR_m2_sce),]$V3
+
+cell_id <- as.numeric(OVCAR_m2_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(2,7,8,15,16)] <- "m2"
+
+OVCAR_m2_sce$cell_id <- cell_id
+
+cellchat_ovcar_m2 <- createCellChat(object = OVCAR_m2_sce,
+                                     group.by = "cell_id", assay = "logcounts",
+                                     do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat_ovcar_m2@DB <- CellChatDB.use
+
+cellchat_ovcar_m2 <- subsetData(cellchat_ovcar_m2)
+future::plan("multisession", workers = 20)
+cellchat_ovcar_m2 <- identifyOverExpressedGenes(cellchat_ovcar_m2)
+cellchat_ovcar_m2 <- identifyOverExpressedInteractions(cellchat_ovcar_m2)
+
+cellchat_ovcar_m2 <- projectData(cellchat_ovcar_m2, PPI.human)
+
+cellchat_ovcar_m2 <- computeCommunProb(cellchat_ovcar_m2, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat_ovcar_m2 <- filterCommunication(cellchat_ovcar_m2, min.cells = 10)
+
+cellchat_ovcar_m2 <- computeCommunProbPathway(cellchat_ovcar_m2)
+
+cellchat_ovcar_m2 <- aggregateNet(cellchat_ovcar_m2)
+# 
+# saveRDS(cellchat_ovcar_m2, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cellchat_ovcar_m2.rds")
+cellchat <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cellchat_ovcar_m2.rds")
+cellchat <- netAnalysis_computeCentrality(cellchat)
+
+################## Sender-receiver heatmap ######################
+
+ht1 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+ht2 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming")
+ht1  + ht2
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/ovcar_m2/sender_receiver_hmap.pdf"), width = 12, height = 8)
+print(ht1  + ht2)
+dev.off()
+
+
+#################### circle-plot (common) ########################
+
+mat <- cellchat@net$weight
+groupSize <- as.numeric(table(cellchat@idents))
+
+par(mfrow = c(1,2), xpd=TRUE)
+c1 <- netVisual_circle(mat, vertex.weight = groupSize, 
+                       weight.scale = T, label.edge= F, 
+                       title.name = "Number of interactions",
+                       arrow.size = 1)
+c2 <- netVisual_circle(mat, vertex.weight = groupSize, 
+                       weight.scale = T, label.edge= F,
+                       title.name = "Interaction weights/strength",
+                       arrow.size = 1)
+
+c2
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/ovcar_m2/combined_circle_plot.pdf"), width = 12, height = 8)
+print(c2)
+
+par(mfrow = c(2,4), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), 
+                 ncol = ncol(mat), 
+                 dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  id_wise_plt <- netVisual_circle(mat2, vertex.weight = groupSize, 
+                   weight.scale = T, edge.weight.max = max(mat), 
+                   title.name = rownames(mat)[i],
+                   arrow.size = 1)
+}
+print(id_wise_plt)
+dev.off()
+
+```
+
+### CellChat analysis - msc+m2
+
+```{r ligand_receptor_msc_m2}
+
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+# 
+# ################### msc_m2 ##################
+
+msc_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in% c(1,6,12,
+                                                                        14,3,7,
+                                                                        8,2,15,
+                                                                        16)) &
+                                        (dual_filtered_sce$sample == "msc_m2")]
+rownames(msc_m2_sce) <- ens2gene_2[rownames(msc_m2_sce),]$V3
+
+cell_id <- as.numeric(msc_m2_sce$label)
+cell_id[cell_id %in% c(1,6,12,14)] <- "msc"
+cell_id[cell_id %in% c(3,7,8,2,15,16)] <- "m2"
+
+msc_m2_sce$cell_id <- cell_id
+
+cellchat_msc_m2 <- createCellChat(object = msc_m2_sce,
+                                  group.by = "cell_id", 
+                                  assay = "logcounts",
+                                  do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat_msc_m2@DB <- CellChatDB.use
+
+cellchat_msc_m2 <- subsetData(cellchat_msc_m2)
+future::plan("multisession", workers = 20)
+cellchat_msc_m2 <- identifyOverExpressedGenes(cellchat_msc_m2)
+cellchat_msc_m2 <- identifyOverExpressedInteractions(cellchat_msc_m2)
+
+cellchat_msc_m2 <- projectData(cellchat_msc_m2, PPI.human)
+
+cellchat_msc_m2 <- computeCommunProb(cellchat_msc_m2, type = "truncatedMean",
+                                     trim = 0.1, distance.use = TRUE, 
+                                     interaction.length = 200,
+                                     scale.distance = 0.01)
+cellchat_msc_m2 <- filterCommunication(cellchat_msc_m2, min.cells = 10)
+
+cellchat_msc_m2 <- computeCommunProbPathway(cellchat_msc_m2)
+
+cellchat_msc_m2 <- aggregateNet(cellchat_msc_m2)
+
+saveRDS(cellchat_msc_m2, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cellchat_msc_m2.rds")
+cellchat <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cellchat_msc_m2.rds")
+cellchat <- netAnalysis_computeCentrality(cellchat)
+
+################## Sender-receiver heatmap ######################
+
+ht1 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+ht2 = netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming")
+ht1  + ht2
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/msc_m2/sender_receiver_hmap.pdf"),
+    width = 12, height = 8)
+print(ht1  + ht2)
+dev.off()
+
+
+#################### circle-plot (common) ########################
+
+mat <- cellchat@net$weight
+groupSize <- as.numeric(table(cellchat@idents))
+
+par(mfrow = c(1,2), xpd=TRUE)
+c1 <- netVisual_circle(mat, vertex.weight = groupSize, 
+                       weight.scale = T, label.edge= F, 
+                       title.name = "Number of interactions",
+                       arrow.size = 1)
+c2 <- netVisual_circle(mat, vertex.weight = groupSize, 
+                       weight.scale = T, label.edge= F,
+                       title.name = "Interaction weights/strength",
+                       arrow.size = 1)
+
+c2
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/msc_m2/combined_circle_plot.pdf"), width = 12, height = 8)
+print(c2)
+
+par(mfrow = c(2,4), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), 
+                 ncol = ncol(mat), 
+                 dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  id_wise_plt <- netVisual_circle(mat2, vertex.weight = groupSize, 
+                   weight.scale = T, edge.weight.max = max(mat), 
+                   title.name = rownames(mat)[i],
+                   arrow.size = 1)
+}
+print(id_wise_plt)
+dev.off()
+
+```
+
+
+
+```{r ovcar_msc_ovcar_msc_m2}
+
+library(CellChat)
+library(patchwork)
+library(umap)
+library(NMF)
+
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+################### ovcar_msc_m2 ##################
+
+OVCAR_msc_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in% c(4,5,9,10,13,
+                                                                              1,6)) &
+                                        (dual_filtered_sce$sample == "ovcar_msc_m2")]
+rownames(OVCAR_msc_m2_sce) <- ens2gene_2[rownames(OVCAR_msc_m2_sce),]$V3
+
+cell_id <- as.numeric(OVCAR_msc_m2_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(1,6)] <- "msc"
+
+OVCAR_msc_m2_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = OVCAR_msc_m2_sce,
+                           group.by = "cell_id", assay = "logcounts", do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 28)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "triMean", trim = 0.05,
+                              raw.use = FALSE,
+                              distance.use = TRUE, interaction.length = 300,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/cellchat_ovcar_msc_m2.rds")
+# 
+# ################### ovcar_msc ##################
+
+OVCAR_msc_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in%
+                                              c(4,5,9,10,13,1,6)) &
+                                     (dual_filtered_sce$sample == "ovcar_msc")]
+rownames(OVCAR_msc_sce) <- ens2gene_2[rownames(OVCAR_msc_sce),]$V3
+
+cell_id <- as.numeric(OVCAR_msc_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(1,6)] <- "msc"
+
+OVCAR_msc_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = OVCAR_msc_sce,
+                           group.by = "cell_id", assay = "logcounts", do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/cellchat_ovcar_msc.rds")
+
+############# diff interaction #############
+
+cellchat.ovcar_msc_m2 <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/cellchat_ovcar_msc_m2.rds")
+cellchat.ovcar_msc_m2 <- netAnalysis_computeCentrality(cellchat.ovcar_msc_m2)
+
+cellchat.ovcar_msc <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/cellchat_ovcar_msc.rds")
+cellchat.ovcar_msc <- netAnalysis_computeCentrality(cellchat.ovcar_msc)
+
+object.list <- list(ovcar_msc = cellchat.ovcar_msc, 
+                    ovcar_msc_m2 = cellchat.ovcar_msc_m2)
+cellchat <- mergeCellChat(object.list, 
+                          add.names = names(object.list))
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_msc_vs_tricult/comp_int.pdf"), 
+    width = 12, height = 8)
+
+comp_int1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+comp_int2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2),
+                           measure = "weight")
+
+print(comp_int1 + comp_int2)
+
+dev.off()
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_msc_vs_tricult/rank_net.pdf"), 
+    width = 12, height = 8)
+
+rank_net1 <- rankNet(cellchat, mode = "comparison", 
+                     stacked = T, do.stat = TRUE,
+                     cutoff.pvalue = 0.01)
+rank_net2 <- rankNet(cellchat, mode = "comparison", 
+                     stacked = F, do.stat = TRUE,
+                     cutoff.pvalue = 0.01)
+print(rank_net1 + rank_net2)
+
+dev.off()
+
+fwrite(as.data.frame(rank_net1$data), 
+       "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_msc_vs_tricult/rank_net.txt",
+       sep = "\t", 
+       row.names = TRUE, 
+       col.names = TRUE)
+
+pathway.union <- c("NRG", "OPIOID", "IL6", "COMPLEMENT", "LIGHT",
+                   "MIF", "GAS", "PDGF", "WNT", "TGFb", "BMP")
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_msc_vs_tricult/netVis_bubble.pdf"), 
+    width = 12, height = 14)
+
+netVis_bubble1 <- netVisual_bubble(cellchat, comparison = c(1, 2),
+                                   signaling = pathway.union[pathway.union != "SPP1"],
+                                   sources.use = c("ovcar", "msc"), 
+                                   targets.use = c("msc", "ovcar"),
+                                   title.name = "Increased signaling in OVCAR_msc_m2", 
+                                   angle.x = 45, 
+                                   max.dataset = 2,
+                                   thresh = 0.01)
+
+netVis_bubble2 <- netVisual_bubble(cellchat, comparison = c(1, 2), 
+                                   signaling = pathway.union[pathway.union != "SPP1"],
+                                   sources.use = c("ovcar", "msc"), 
+                                   targets.use = c("msc", "ovcar"),
+                                   title.name = "Decreased signaling in OVCAR_msc_m2", 
+                                   angle.x = 45, 
+                                   max.dataset = 1,
+                                   thresh = 0.01)
+
+print(netVis_bubble1 + netVis_bubble2)
+
+dev.off()
+
+fwrite(as.data.frame(netVis_bubble1$data), 
+       "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_msc_vs_tricult/netVis_bubble.txt",
+       sep = "\t", 
+       row.names = TRUE, 
+       col.names = TRUE)
+
+
+ht1 = netAnalysis_signalingRole_heatmap(cellchat.ovcar_msc_m2, pattern = "outgoing")
+ht2 = netAnalysis_signalingRole_heatmap(cellchat.ovcar_msc_m2, pattern = "incoming")
+ht1  + ht2
+
+gg1 <- netVisual_heatmap(cellchat)
+gg2 <- netVisual_heatmap(cellchat, measure = "weight")
+
+gg1 + gg2
+
+library(ComplexHeatmap)
+i = 1
+
+pathway.union <- c("NRG", "OPIOID", "IL6", "COMPLEMENT", "LIGHT")
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]],
+                                        # signaling =pathway.union,
+                                        pattern = "outgoing",
+                                        title = names(object.list)[i],
+                                        width = 5, height = 6)
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]],
+                                        # signaling = pathway.union,
+                                        pattern = "outgoing",
+                                        title = names(object.list)[i+1],
+                                        width = 5, height = 6)
+ht1
+ht2
+
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]],
+                                        pattern = "incoming",
+                                         # signaling = pathway.union,
+                                        title = names(object.list)[i],
+                                        width = 5, height = 6)
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]],
+                                        pattern = "incoming",
+                                        # signaling = pathway.union,
+                                        title = names(object.list)[i+1],
+                                        width = 5, height = 6)
+ht1
+ht2
+
+
+
+```
+
+```{r ovcar_msc_14_12_ovcar_msc_m2}
+
+library(CellChat)
+library(patchwork)
+library(umap)
+library(NMF)
+
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+################### ovcar_msc_m2 ##################
+
+ovcar_msc_14_12_OVCAR_msc_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in%
+                                                          c(4,5,9,10,13,
+                                                            1,6,12,14)) &
+                                                 (dual_filtered_sce$sample == "ovcar_msc_m2")]
+rownames(ovcar_msc_14_12_OVCAR_msc_m2_sce) <- ens2gene_2[rownames(ovcar_msc_14_12_OVCAR_msc_m2_sce),]$V3
+
+cell_id <- as.numeric(ovcar_msc_14_12_OVCAR_msc_m2_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(1,6,12,14)] <- "msc"
+
+ovcar_msc_14_12_OVCAR_msc_m2_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = ovcar_msc_14_12_OVCAR_msc_m2_sce,
+                           group.by = "cell_id", assay = "logcounts", do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/ovcar_msc_14_12_OVCAR_msc_m2_sce.rds")
+
+################### ovcar_msc ##################
+
+ovcar_msc_12_14_OVCAR_msc_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in%
+                                                              c(4,5,9,10,13,1,6,12,14)) &
+                                                     (dual_filtered_sce$sample == "ovcar_msc")]
+rownames(ovcar_msc_12_14_OVCAR_msc_sce) <- ens2gene_2[rownames(ovcar_msc_12_14_OVCAR_msc_sce),]$V3
+
+cell_id <- as.numeric(ovcar_msc_12_14_OVCAR_msc_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(1,6,12,14)] <- "msc"
+
+ovcar_msc_12_14_OVCAR_msc_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = ovcar_msc_12_14_OVCAR_msc_sce,
+                           group.by = "cell_id", assay = "logcounts", do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/ovcar_msc_12_14_OVCAR_msc_sce.rds")
+
+############# diff interaction #############
+
+cellchat.ovcar_msc_m2 <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/ovcar_msc_14_12_OVCAR_msc_m2_sce.rds")
+cellchat.ovcar_msc_m2 <- netAnalysis_computeCentrality(cellchat.ovcar_msc_m2)
+
+cellchat.ovcar_msc <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/ovcar_msc_12_14_OVCAR_msc_sce.rds")
+cellchat.ovcar_msc <- netAnalysis_computeCentrality(cellchat.ovcar_msc)
+
+object.list <- list(ovcar_msc = cellchat.ovcar_msc, 
+                    ovcar_msc_m2 = cellchat.ovcar_msc_m2)
+cellchat <- mergeCellChat(object.list, 
+                          add.names = names(object.list))
+
+gg1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2),
+                           measure = "weight")
+
+gg1 + gg2
+
+gg1 <- rankNet(cellchat, mode = "comparison", 
+               stacked = T, do.stat = TRUE,
+               cutoff.pvalue = 0.01)
+gg2 <- rankNet(cellchat, mode = "comparison", 
+               stacked = F, do.stat = TRUE,
+               cutoff.pvalue = 0.01)
+gg1 + gg2
+
+gg1 <- netVisual_heatmap(cellchat)
+gg2 <- netVisual_heatmap(cellchat, measure = "weight")
+
+gg1 + gg2
+
+library(ComplexHeatmap)
+i = 1
+
+pathway.union <- c("MIF", "COMPLEMENT", "IL6", "GAS")
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], 
+                                        # signaling =pathway.union,
+                                        pattern = "outgoing", 
+                                        title = names(object.list)[i], 
+                                        width = 5, height = 6)
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]],
+                                        # signaling = pathway.union,
+                                        pattern = "outgoing", 
+                                        title = names(object.list)[i+1], 
+                                        width = 5, height = 6)
+ht1
+ht2
+
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], 
+                                        pattern = "incoming", 
+                                         # signaling = pathway.union,
+                                        title = names(object.list)[i], 
+                                        width = 5, height = 6)
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], 
+                                        pattern = "incoming", 
+                                        # signaling = pathway.union,
+                                        title = names(object.list)[i+1], 
+                                        width = 5, height = 6)
+ht1
+ht2
+
+gg1 <- netVisual_bubble(cellchat, comparison = c(1, 2),
+                        signaling = pathway.union[pathway.union != "SPP1"],
+                        sources.use = c("ovcar", "msc"), 
+                        targets.use = c("msc", "ovcar"),
+                        title.name = "Increased signaling in OVCAR_msc_m2", 
+                        angle.x = 45, 
+                        max.dataset = 2,
+                        thresh = 0.01)
+
+gg2 <- netVisual_bubble(cellchat, comparison = c(1, 2), 
+                         signaling = pathway.union[pathway.union != "SPP1"],
+                        sources.use = c("ovcar", "msc"), 
+                        targets.use = c("msc", "ovcar"),
+                        title.name = "Decreased signaling in OVCAR_msc_m2", 
+                        angle.x = 45, 
+                        max.dataset = 1,
+                        thresh = 0.01)
+
+gg1 + gg2
+
+```
+
+```{r ovcar_m2_ovcar_msc_m2}
+
+library(CellChat)
+library(patchwork)
+library(umap)
+library(NMF)
+
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+################### ovcar_msc_m2 ##################
+
+ovcar_m2_OVCAR_msc_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in%
+                                                          c(4,5,9,10,13,
+                                                            2,7,8,15,16)) &
+                                                 (dual_filtered_sce$sample == "ovcar_msc_m2")]
+rownames(ovcar_m2_OVCAR_msc_m2_sce) <- ens2gene_2[rownames(ovcar_m2_OVCAR_msc_m2_sce),]$V3
+
+cell_id <- as.numeric(ovcar_m2_OVCAR_msc_m2_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(2,7,8,15,16)] <- "m2"
+
+ovcar_m2_OVCAR_msc_m2_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = ovcar_m2_OVCAR_msc_m2_sce,
+                           group.by = "cell_id", assay = "logcounts", do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/ovcar_m2_OVCAR_msc_m2_sce.rds")
+
+################### ovcar_msc ##################
+
+ovcar_m2_OVCAR_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in%
+                                                      c(4,5,9,10,13,
+                                                        2,7,8,15,16)) &
+                                             (dual_filtered_sce$sample == "ovcar_m2")]
+rownames(ovcar_m2_OVCAR_m2_sce) <- ens2gene_2[rownames(ovcar_m2_OVCAR_m2_sce),]$V3
+
+cell_id <- as.numeric(ovcar_m2_OVCAR_m2_sce$label)
+cell_id[cell_id %in% c(4,5,9,10,13)] <- "ovcar"
+cell_id[cell_id %in% c(2,7,8,15,16)] <- "m2"
+
+ovcar_m2_OVCAR_m2_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = ovcar_m2_OVCAR_m2_sce,
+                           group.by = "cell_id", assay = "logcounts",
+                           do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/ovcar_m2_OVCAR_m2_sce.rds")
+
+############## diff interaction ###############
+
+cellchat.ovcar_msc_m2 <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/ovcar_m2_OVCAR_msc_m2_sce.rds")
+cellchat.ovcar_msc_m2 <- netAnalysis_computeCentrality(cellchat.ovcar_msc_m2)
+
+cellchat.ovcar_m2 <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/ovcar_m2_OVCAR_m2_sce.rds")
+cellchat.ovcar_m2 <- netAnalysis_computeCentrality(cellchat.ovcar_m2)
+
+object.list <- list(ovcar_m2 = cellchat.ovcar_m2, 
+                    ovcar_msc_m2 = cellchat.ovcar_msc_m2)
+cellchat <- mergeCellChat(object.list, 
+                          add.names = names(object.list))
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_m2_vs_tricult/comp_int.pdf"), 
+    width = 12, height = 8)
+
+comp_int1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+comp_int2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2),
+                           measure = "weight")
+
+print(comp_int1 + comp_int2)
+
+dev.off()
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_m2_vs_tricult/rank_net.pdf"), 
+    width = 12, height = 8)
+
+rank_net1 <- rankNet(cellchat, mode = "comparison", 
+                     stacked = T, do.stat = TRUE,
+                     cutoff.pvalue = 0.01)
+rank_net2 <- rankNet(cellchat, mode = "comparison", 
+                     stacked = F, do.stat = TRUE,
+                     cutoff.pvalue = 0.01)
+print(rank_net1 + rank_net2)
+
+dev.off()
+
+fwrite(as.data.frame(rank_net1$data), 
+       "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_m2_vs_tricult/rank_net.txt",
+       sep = "\t", 
+       row.names = TRUE, 
+       col.names = TRUE)
+
+pathway.union <- c("PSAP","VEGF","ANGPT","NT","PROS","PERIOSTIN",
+                   "LIFR","PDGF", "ANNEXIN", "WNT", "BMP", "TGFb", "IL6")
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_m2_vs_tricult/netVis_bubble.pdf"), 
+    width = 12, height = 14)
+
+netVis_bubble1 <- netVisual_bubble(cellchat, comparison = c(1, 2),
+                                   signaling = pathway.union[pathway.union != "SPP1"],
+                                   sources.use = c("ovcar", "m2"), 
+                                   targets.use = c("m2", "ovcar"),
+                                   title.name = "Increased signaling in OVCAR_msc_m2", 
+                                   angle.x = 45, 
+                                   max.dataset = 2,
+                                   thresh = 0.01)
+
+netVis_bubble2 <- netVisual_bubble(cellchat, comparison = c(1, 2), 
+                                   signaling = pathway.union[pathway.union != "SPP1"],
+                                   sources.use = c("ovcar", "m2"), 
+                                   targets.use = c("m2", "ovcar"),
+                                   title.name = "Decreased signaling in OVCAR_msc_m2", 
+                                   angle.x = 45, 
+                                   max.dataset = 1,
+                                   thresh = 0.01)
+
+print(netVis_bubble1 + netVis_bubble2)
+
+dev.off()
+
+fwrite(as.data.frame(netVis_bubble1$data), 
+       "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/ovacar_m2_vs_tricult/netVis_bubble.txt",
+       sep = "\t", 
+       row.names = TRUE, 
+       col.names = TRUE)
+
+```
+
+```{r}
+
+library(CellChat)
+library(patchwork)
+library(umap)
+library(NMF)
+
+options(stringsAsFactors = FALSE)
+
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+################### ovcar_msc_m2 ##################
+
+msc_m2_OVCAR_msc_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in%
+                                                          c(1,6,
+                                                            2,7,8,15,16)) &
+                                                 (dual_filtered_sce$sample == "ovcar_msc_m2")]
+rownames(msc_m2_OVCAR_msc_m2_sce) <- ens2gene_2[rownames(msc_m2_OVCAR_msc_m2_sce),]$V3
+
+cell_id <- as.numeric(msc_m2_OVCAR_msc_m2_sce$label)
+cell_id[cell_id %in% c(1,6)] <- "msc"
+cell_id[cell_id %in% c(2,7,8,15,16)] <- "m2"
+
+msc_m2_OVCAR_msc_m2_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = msc_m2_OVCAR_msc_m2_sce,
+                           group.by = "cell_id", assay = "logcounts", do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/msc_m2_OVCAR_msc_m2_sce.rds")
+
+################### ovcar_msc ##################
+
+msc_m2_msc_m2_sce <- dual_filtered_sce[1:62710,(dual_filtered_sce$label %in%
+                                                      c(1,6,
+                                                        2,7,8,15,16)) &
+                                             (dual_filtered_sce$sample == "msc_m2")]
+rownames(msc_m2_msc_m2_sce) <- ens2gene_2[rownames(msc_m2_msc_m2_sce),]$V3
+
+cell_id <- as.numeric(msc_m2_msc_m2_sce$label)
+cell_id[cell_id %in% c(1,6)] <- "msc"
+cell_id[cell_id %in% c(2,7,8,15,16)] <- "m2"
+
+msc_m2_msc_m2_sce$cell_id <- cell_id
+
+cellchat <- createCellChat(object = msc_m2_msc_m2_sce,
+                           group.by = "cell_id", assay = "logcounts",
+                           do.sparse = T)
+
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 20)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.length = 200,
+                              scale.distance = 0.01)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/msc_m2_msc_m2_sce.rds")
+
+############ diff interaction #################
+
+cellchat.ovcar_msc_m2 <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/msc_m2_OVCAR_msc_m2_sce.rds")
+cellchat.ovcar_msc_m2 <- netAnalysis_computeCentrality(cellchat.ovcar_msc_m2)
+
+cellchat.msc_m2 <- readRDS("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/tri_ovcar_msc/msc_m2_msc_m2_sce.rds")
+cellchat.msc_m2 <- netAnalysis_computeCentrality(cellchat.msc_m2)
+
+object.list <- list(msc_m2 = cellchat.msc_m2, 
+                    ovcar_msc_m2 = cellchat.ovcar_msc_m2)
+cellchat <- mergeCellChat(object.list, 
+                          add.names = names(object.list))
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/msc_m2_vs_tricult/comp_int.pdf"), 
+    width = 12, height = 8)
+
+comp_int1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+comp_int2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2),
+                           measure = "weight")
+
+print(comp_int1 + comp_int2)
+
+dev.off()
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/msc_m2_vs_tricult/rank_net.pdf"), 
+    width = 12, height = 8)
+
+rank_net1 <- rankNet(cellchat, mode = "comparison", 
+                     stacked = T, do.stat = TRUE,
+                     cutoff.pvalue = 0.01)
+rank_net2 <- rankNet(cellchat, mode = "comparison", 
+                     stacked = F, do.stat = TRUE,
+                     cutoff.pvalue = 0.01)
+print(rank_net1 + rank_net2)
+
+dev.off()
+
+fwrite(as.data.frame(rank_net1$data), 
+       "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/msc_m2_vs_tricult/rank_net.txt",
+       sep = "\t", 
+       row.names = TRUE, 
+       col.names = TRUE)
+
+pathway.union <- c("GAS","SEMA3","PERIOSTIN",
+                   "TGFb","SPP1","GDF", "ACTIVIN",
+                   "MK", "RESISTIN", "IL6")
+
+pdf(file=paste0("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/msc_m2_vs_tricult/netVis_bubble.pdf"), 
+    width = 12, height = 14)
+
+netVis_bubble1 <- netVisual_bubble(cellchat, comparison = c(1, 2),
+                                   sources.use = c("msc", "m2"), 
+                                   targets.use = c("m2", "msc"),
+                                   title.name = "Increased signaling in OVCAR_msc_m2", 
+                                   angle.x = 45, 
+                                   max.dataset = 2,
+                                   thresh = 0.01)
+
+netVis_bubble2 <- netVisual_bubble(cellchat, comparison = c(1, 2), 
+                                   sources.use = c("msc", "m2"), 
+                                   targets.use = c("m2", "msc"),
+                                   title.name = "Decreased signaling in OVCAR_msc_m2", 
+                                   angle.x = 45, 
+                                   max.dataset = 1,
+                                   thresh = 0.01)
+
+print(netVis_bubble1 + netVis_bubble2)
+
+dev.off()
+
+fwrite(as.data.frame(netVis_bubble1$data), 
+       "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/cell_cell_comm/diff_int/msc_m2_vs_tricult/netVis_bubble.txt",
+       sep = "\t", 
+       row.names = TRUE, 
+       col.names = TRUE)
+
+```
+
+
+## NMF
+
+```{r NMF_dim_red, fig.width=20, fig.height=14, cache=TRUE}
+
+dim(sim_GFP_smURFP_df[sim_GFP_smURFP_df$GFP_mCherry == "Yes",])
+summary(sim_GFP_smURFP_df[sim_GFP_smURFP_df$GFP_mCherry == "Yes",]$doublet_score)
+
+library(singlet)
+
+sim_GFP_smURFP_w_NMF <- sim_GFP_smURFP
+
+set.seed(1011011)
+sim_GFP_smURFP_w_NMF <- singlet::RunNMF(sim_GFP_smURFP_w_NMF, threads=0)
+
+set.seed(1011011)
+sim_GFP_smURFP_w_NMF <- runUMAP(sim_GFP_smURFP_w_NMF, dimred="nmf", min_dist=0.2,
+                                n_dimred = ncol(reducedDim(sim_GFP_smURFP_w_NMF, "nmf")),
+                                n_neighbors=250, exprs_values = "logcounts")
+
+set.seed(1011011)
+sim_GFP_smURFP_w_NMF.cl <- clusterCells(sim_GFP_smURFP_w_NMF, use.dimred = "nmf",
+                                        BLUSPARAM=TwoStepParam(first=KmeansParam(centers=1000),
+                                                               second=NNGraphParam(k=5)))
+
+######################################################
+#################### plots ##########################
+######################################################
+
+sim_GFP_smURFP_w_NMF_df <- data.frame(UMAP1 = reducedDim(sim_GFP_smURFP_w_NMF, "UMAP")[,1],
+                              UMAP2 = reducedDim(sim_GFP_smURFP_w_NMF, "UMAP")[,2],
+                              
+                              GFP = unname(log2(counts(sim_GFP_smURFP_w_NMF)["GFP",] +
+                                                counts(sim_GFP_smURFP_w_NMF)["EGFP",] + 1)),
+                              mCherry =  unname(log2(counts(combined_no_db_hi_lib_sce)["mCherry",] + 1)),
+                             smURFP = unname(log2(counts(combined_no_db_hi_lib_sce)["smURFP",] + 1)),
+                              
+                              GFP_exp = colData(sim_GFP_smURFP_w_NMF)$GFP_exp,
+                              mCherry_exp = colData(sim_GFP_smURFP_w_NMF)$mCherry_exp,
+                              smURFP_exp = colData(sim_GFP_smURFP_w_NMF)$smURFP_exp,
+                              
+                              msc_markers = unname(logcounts(sim_GFP_smURFP_w_NMF)[gene_annotation[gene_annotation$V3 == "NT5E", 
+                                                                                                        "ENSMBL_id"][1],] +
+                                                     logcounts(sim_GFP_smURFP_w_NMF)[gene_annotation[gene_annotation$V3 == "THY1", 
+                                                                                                          "ENSMBL_id"][1],] + 
+                                                     logcounts(sim_GFP_smURFP_w_NMF)[gene_annotation[gene_annotation$V3 == "ENG", 
+                                                                                                          "ENSMBL_id"][1],]), 
+                              
+                              m2_markers = unname(logcounts(sim_GFP_smURFP_w_NMF)[gene_annotation[gene_annotation$V3 == "CD4", 
+                                                                                                       "ENSMBL_id"][1],] +
+                                                    logcounts(sim_GFP_smURFP_w_NMF)[gene_annotation[gene_annotation$V3 == "ITGAD", 
+                                                                                                         "ENSMBL_id"][1],] + 
+                                                    logcounts(sim_GFP_smURFP_w_NMF)[gene_annotation[gene_annotation$V3 == "CD14", 
+                                                                                                         "ENSMBL_id"][1],] +
+                                                    logcounts(sim_GFP_smURFP_w_NMF)[gene_annotation[gene_annotation$V3 == "PTPRC", 
+                                                                                                         "ENSMBL_id"][1],]), 
+                              
+                              ovcar_markers = unname(logcounts(sim_GFP_smURFP_w_NMF)[gene_annotation[gene_annotation$V3 == "EPCAM", 
+                                                                                                          "ENSMBL_id"][1],]), 
+                              
+                              sample = colData(sim_GFP_smURFP_w_NMF)$sample,
+                              lib_size = log2(sim_GFP_smURFP_w_NMF$sum + 1),
+                              features = log2(sim_GFP_smURFP_w_NMF$detected + 1),
+                              mt_perc = sim_GFP_smURFP_w_NMF$subsets_Mito_percent,
+                              cluster = sim_GFP_smURFP_w_NMF$label,
+                              GFP_smURFP = colData(sim_GFP_smURFP_w_NMF)$GFP_smURFP,
+                              GFP_mCherry = colData(sim_GFP_smURFP_w_NMF)$GFP_mCherry,
+                              smURFP_mCherry = colData(sim_GFP_smURFP_w_NMF)$smURFP_mCherry,
+                              doublet_score = colData(sim_GFP_smURFP_w_NMF)$scDblFinder.score)
+
+sim_GFP_smURFP_w_NMF_df$MSC_stat <- rep("not expressed", nrow(sim_GFP_smURFP_w_NMF_df))
+sim_GFP_smURFP_w_NMF_df$M2_stat <- rep("not expressed", nrow(sim_GFP_smURFP_w_NMF_df))
+sim_GFP_smURFP_w_NMF_df$OVCAR_stat <- rep("not expressed", nrow(sim_GFP_smURFP_w_NMF_df))
+
+sim_GFP_smURFP_w_NMF_df[sim_GFP_smURFP_w_NMF_df$msc_markers > 0.15,]$MSC_stat <- "expressed"  
+sim_GFP_smURFP_w_NMF_df[sim_GFP_smURFP_w_NMF_df$m2_markers > 0.15,]$M2_stat <- "expressed"
+sim_GFP_smURFP_w_NMF_df[sim_GFP_smURFP_w_NMF_df$ovcar_markers > 0.15,]$OVCAR_stat <- "expressed"
+
+
+sim_GFP_smURFP_w_NMF_df$cluster <- factor(sim_GFP_smURFP_w_NMF_df$cluster,
+                           levels = levels(sim_GFP_smURFP_w_NMF_df$cluster))
+
+NMF_bc_sample_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                 sim_GFP_smURFP_w_NMF_df$sample, 0.4,
+                                 "UMAP (colored by sample)",
+                                 "UMAP1", "UMAP2", "Cluster", "disc")
+
+
+NMF_bc_cluster_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                  sim_GFP_smURFP_w_NMF_df$cluster, 0.4,
+                                  "Cluster label",
+                                  "UMAP1", "UMAP2", "Cluster", "disc")
+
+NMF_bc_GFP_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                              sim_GFP_smURFP_w_NMF_df$GFP, sim_GFP_smURFP_w_NMF_df$GFP,
+                              "GFP",
+                              "UMAP1", "UMAP2", "GFP", "cont")
+
+NMF_bc_mCherry_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                  sim_GFP_smURFP_w_NMF_df$mCherry, sim_GFP_smURFP_w_NMF_df$mCherry,
+                                  "mCherry",
+                                  "UMAP1", "UMAP2", "mCherry", "cont")
+
+NMF_bc_smURFP_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                 sim_GFP_smURFP_w_NMF_df$smURFP, sim_GFP_smURFP_w_NMF_df$smURFP,
+                                 "smURFP",
+                                 "UMAP1", "UMAP2", "smURFP", "cont")
+
+NMF_bc_lib_size_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                   sim_GFP_smURFP_w_NMF_df$lib_size, 0.4,
+                                   "Library size",
+                                   "UMAP1", "UMAP2", "lib_size", "cont")
+
+NMF_bc_features_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                   sim_GFP_smURFP_w_NMF_df$features, 0.4,
+                                   "Detected features",
+                                   "UMAP1", "UMAP2", "features", "cont")
+
+NMF_bc_mt_perc_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                  sim_GFP_smURFP_w_NMF_df$mt_perc, 0.4,
+                                  "Mito percent",
+                                  "UMAP1", "UMAP2", "Mito precent", "cont")
+
+NMF_bc_msc_markers_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                      sim_GFP_smURFP_w_NMF_df$msc_markers, sim_GFP_smURFP_w_NMF_df$msc_markers,
+                                      "MSC markers",
+                                      "UMAP1", "UMAP2", "log2(counts)", "cont")
+NMF_bc_msc_stat_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                   sim_GFP_smURFP_w_NMF_df$MSC_stat, 0.4,
+                                   "MSC markers expression status",
+                                   "UMAP1", "UMAP2", "status", "disc")
+
+NMF_bc_m2_markers_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                     sim_GFP_smURFP_w_NMF_df$m2_markers, sim_GFP_smURFP_w_NMF_df$m2_markers,
+                                     "M2 markers",
+                                     "UMAP1", "UMAP2", "log2(counts)", "cont")
+NMF_bc_m2_stat_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                  sim_GFP_smURFP_w_NMF_df$M2_stat, 0.4,
+                                  "M2 markers expression status",
+                                  "UMAP1", "UMAP2", "status", "disc")
+
+NMF_bc_ovcar_markers_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                        sim_GFP_smURFP_w_NMF_df$ovcar_markers, sim_GFP_smURFP_w_NMF_df$ovcar_markers,
+                                        "OVCAR markers",
+                                        "UMAP1", "UMAP2", "log2(counts)", "cont")
+NMF_bc_ovcar_stat_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                     sim_GFP_smURFP_w_NMF_df$OVCAR_stat, 0.4,
+                                     "OVCAR markers expression status",
+                                     "UMAP1", "UMAP2", "status", "disc")
+
+NMf_GFP_exp_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                            sim_GFP_smURFP_w_NMF_df$GFP_exp, 0.4,
+                            "",
+                            "UMAP1", "UMAP2", "GFP", "disc")
+NMf_mCherry_exp_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                sim_GFP_smURFP_w_NMF_df$mCherry_exp, 0.4,
+                                "",
+                                "UMAP1", "UMAP2", "mCherry", "disc")
+NMf_smURFP_exp_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                               sim_GFP_smURFP_w_NMF_df$smURFP_exp, 0.4,
+                               "",
+                               "UMAP1", "UMAP2", "smURFP", "disc")
+NMf_GFP_smURFP_exp_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                   sim_GFP_smURFP_w_NMF_df$GFP_smURFP, 0.4,
+                                   "",
+                                   "UMAP1", "UMAP2", "GFP_smURFP", "disc")
+NMf_GFP_mCherry_exp_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                    sim_GFP_smURFP_w_NMF_df$GFP_mCherry, 0.4,
+                                    "",
+                                    "UMAP1", "UMAP2", "GFP_mCherry", "disc")
+NMf_smURFP_mCherry_exp_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                       sim_GFP_smURFP_w_NMF_df$smURFP_mCherry, 0.4,
+                                       "",
+                                       "UMAP1", "UMAP2", "smURFP_mCherry", "disc")
+NMf_doublet_score_plot <- dimRed_plot(sim_GFP_smURFP_w_NMF_df$UMAP1, sim_GFP_smURFP_w_NMF_df$UMAP2,
+                                  sim_GFP_smURFP_w_NMF_df$doublet_score, 0.4,
+                                  "",
+                                  "UMAP1", "UMAP2", "Doublet score", "cont")
+
+NMF_bc_dim_red_plots <- ggarrange(NMF_bc_sample_plot, NMF_bc_cluster_plot,
+                                 NMF_bc_GFP_plot, NMF_bc_mCherry_plot, 
+                                 NMF_bc_smURFP_plot,
+                                 ncol = 3, nrow = 2)
+NMF_bc_lib_features_plots <- ggarrange(NMF_bc_cluster_plot, NMF_bc_lib_size_plot, 
+                                      NMF_bc_features_plot, NMF_bc_mt_perc_plot,
+                                      ncol = 3, nrow = 2)
+
+NMF_bc_dim_red_plots
+NMF_bc_lib_features_plots
+ggarrange(NMf_GFP_exp_plot, NMf_mCherry_exp_plot, NMf_smURFP_exp_plot,
+          NMf_GFP_smURFP_exp_plot, NMf_GFP_mCherry_exp_plot, NMf_smURFP_mCherry_exp_plot)
+
+```
+
+## GSEA based on clusters
+
+## OVCAR comparsions
+
+```{r no_bc_gsea, fig.width=16, fig.height=10, cache=TRUE}
+
+library(org.Hs.eg.db)
+
+################### marker genes ##################
+
+set.seed(1011011)
+all_clusters_gene_marker_info <- scoreMarkers(combined_no_db_hi_lib_sce, 
+                                       combined_no_db_hi_lib_sce$label,
+                                       assay.type = "logcounts")
+
+saveRDS(all_clusters_gene_marker_info, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/all_clusters/all_clusters_gene_marker_info.rds")
+
+samples <- names(all_clusters_gene_marker_info)
+
+Halmmark_path <- read.gmt("/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/h.all.v2023.1.Hs.symbols.gmt.txt")
+
+gsea_plots(all_clusters_gene_marker_info, samples, Halmmark_path, "/path/to/kallisto_analysis/kb_python_gene_counts_new/scRNA_seq_analysis/all/all_clusters")
+
+```
+
+
+
+
+
